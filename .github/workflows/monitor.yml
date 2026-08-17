@@ -54,7 +54,9 @@ jobs:
           STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
 
           TZ: Europe/Rome
+
           REMINDER_MINUTES: "45"
+          TELEGRAM_REMINDER_MINUTES: "45,5"
 
           GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
@@ -62,7 +64,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-        run: python monitor.py
+        run: python monitor_runner.py
 
       - name: Salva stato cifrato
         if: success()

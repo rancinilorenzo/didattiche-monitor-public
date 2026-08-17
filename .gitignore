@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Diagnostica locale
+/debug/
+
+# Variabili e segreti locali
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Credenziali Google / OAuth
+*service-account*.json
+*service_account*.json
+didattiche-monitor-*.json
+credentials*.json
+client_secret*.json
+
+# Stato legacy non cifrato
+state.json
+
+# File temporanei
+*.tmp
+.DS_Store
+Thumbs.db

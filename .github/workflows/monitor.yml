@@ -1,0 +1,68 @@
+name: Mercatorum Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mercatorum-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Installa dipendenze
+        run: pip install -r requirements.txt
+
+      - name: Controlla Mercatorum
+        env:
+          MERCATORUM_USERNAME: ${{ secrets.MERCATORUM_USERNAME }}
+          MERCATORUM_PASSWORD: ${{ secrets.MERCATORUM_PASSWORD }}
+          MERCATORUM_SCHEDULE_URL: https://lms.mercatorum.multiversity.click/class?caller=scheduled
+
+          STATE_ENCRYPTION_KEY: ${{ secrets.STATE_ENCRYPTION_KEY }}
+
+          TZ: Europe/Rome
+          REMINDER_MINUTES: "45"
+
+          GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
+          TWILIO_WHATSAPP_TO: ${{ secrets.TWILIO_WHATSAPP_TO }}
+          TWILIO_CONTENT_SID: ${{ secrets.TWILIO_CONTENT_SID }}
+
+        run: python monitor.py
+
+      - name: Salva stato cifrato
+        if: success()
+        run: |
+          if git diff --quiet -- state.enc; then
+            echo "Nessun aggiornamento dello stato cifrato."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state.enc
+          git commit -m "chore: aggiorna stato cifrato [skip ci]"
+          git push

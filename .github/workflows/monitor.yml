@@ -2,6 +2,13 @@ name: Mercatorum Monitor
 
 on:
   workflow_dispatch:
+    inputs:
+      telegram_test:
+        description: "Invia anche un messaggio Telegram di test"
+        required: false
+        default: false
+        type: boolean
+
   schedule:
     - cron: "*/5 * * * *"
 
@@ -30,6 +37,14 @@ jobs:
       - name: Installa dipendenze
         run: pip install -r requirements.txt
 
+      - name: Test Telegram manuale
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_test }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "from monitor import telegram_notify; telegram_notify('✅ Mercatorum Monitor', 'Test da GitHub riuscito. Le notifiche Telegram sono operative.')"
+
       - name: Controlla Mercatorum
         env:
           MERCATORUM_USERNAME: ${{ secrets.MERCATORUM_USERNAME }}
@@ -44,11 +59,8 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
 
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
-          TWILIO_WHATSAPP_TO: ${{ secrets.TWILIO_WHATSAPP_TO }}
-          TWILIO_CONTENT_SID: ${{ secrets.TWILIO_CONTENT_SID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: python monitor.py
 

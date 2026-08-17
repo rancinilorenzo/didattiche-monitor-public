@@ -1,6 +1,4 @@
-# Mercatorum Didattiche Monitor
 
-Monitor personale per controllare periodicamente le didattiche sincrone programmate su Universitas Mercatorum e sincronizzarle con un calendario Google dedicato.
 
 ## Sicurezza
 

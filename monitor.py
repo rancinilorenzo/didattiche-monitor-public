@@ -684,6 +684,59 @@ def calendar_delete(service, calendar_id: str, event_id: str) -> None:
             raise
 
 
+def calendar_managed_event_index(
+    service,
+    calendar_id: str,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """
+    Legge gli eventi creati dal monitor in una sola scansione paginata.
+
+    Restituisce due indici:
+    - event_id -> evento Google
+    - mercatorumExactKey -> evento Google
+    """
+    by_id: dict[str, dict] = {}
+    by_key: dict[str, dict] = {}
+    page_token: str | None = None
+
+    while True:
+        kwargs = {
+            "calendarId": calendar_id,
+            "privateExtendedProperty": "managedBy=mercatorum-monitor",
+            "showDeleted": False,
+            "maxResults": 2500,
+        }
+
+        if page_token:
+            kwargs["pageToken"] = page_token
+
+        response = service.events().list(**kwargs).execute()
+
+        for event in response.get("items", []):
+            event_id = str(event.get("id", "")).strip()
+            if not event_id:
+                continue
+
+            by_id[event_id] = event
+
+            private = (
+                event.get("extendedProperties", {})
+                .get("private", {})
+            )
+            exact_key = str(
+                private.get("mercatorumExactKey", "")
+            ).strip()
+
+            if exact_key:
+                by_key[exact_key] = event
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return by_id, by_key
+
+
 def sync_calendar(
     old_lessons: list[Lesson],
     new_lessons: list[Lesson],
@@ -698,38 +751,172 @@ def sync_calendar(
 
     mapping = dict(calendar_events)
 
-    # First activation (or calendar enabled later): create missing current lessons.
+    # Una sola lettura degli eventi effettivamente presenti su Google Calendar.
+    # Se questa lettura fallisce, non facciamo una ricostruzione cieca che
+    # rischierebbe di creare duplicati.
+    reconciliation_available = True
+
+    try:
+        managed_by_id, managed_by_key = calendar_managed_event_index(
+            service,
+            calendar_id,
+        )
+    except Exception as exc:
+        print(
+            "Riconciliazione Calendar temporaneamente non disponibile: "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        managed_by_id = {}
+        managed_by_key = {}
+        reconciliation_available = False
+
+    known_valid_ids = set(managed_by_id)
+
+    # Prima attivazione / stato Calendar vuoto.
+    # Se gli eventi esistono già, recuperiamo i loro ID invece di duplicarli.
     if not old_lessons or not mapping:
         mapping = {}
+
         for lesson in new_lessons:
-            mapping[lesson.exact_key] = calendar_insert(service, calendar_id, lesson)
+            existing = managed_by_key.get(lesson.exact_key)
+
+            if existing and existing.get("id"):
+                event_id = str(existing["id"])
+                mapping[lesson.exact_key] = event_id
+                known_valid_ids.add(event_id)
+                continue
+
+            mapping[lesson.exact_key] = calendar_insert(
+                service,
+                calendar_id,
+                lesson,
+            )
+            known_valid_ids.add(mapping[lesson.exact_key])
+
         return mapping
 
+    # Modifiche Mercatorum.
     for before, after in modified:
         event_id = mapping.pop(before.exact_key, None)
+
         if event_id:
             try:
-                calendar_update(service, calendar_id, event_id, after)
+                calendar_update(
+                    service,
+                    calendar_id,
+                    event_id,
+                    after,
+                )
                 mapping[after.exact_key] = event_id
+                known_valid_ids.add(event_id)
                 continue
+
             except HttpError as exc:
                 if getattr(exc.resp, "status", None) not in {404, 410}:
                     raise
-        mapping[after.exact_key] = calendar_insert(service, calendar_id, after)
 
+        existing = managed_by_key.get(after.exact_key)
+
+        if existing and existing.get("id"):
+            event_id = str(existing["id"])
+            mapping[after.exact_key] = event_id
+            known_valid_ids.add(event_id)
+        else:
+            event_id = calendar_insert(
+                service,
+                calendar_id,
+                after,
+            )
+            mapping[after.exact_key] = event_id
+            known_valid_ids.add(event_id)
+
+    # Rimozioni Mercatorum confermate.
     for lesson in removed:
         event_id = mapping.pop(lesson.exact_key, None)
+
         if event_id:
-            calendar_delete(service, calendar_id, event_id)
+            calendar_delete(
+                service,
+                calendar_id,
+                event_id,
+            )
 
+    # Nuove didattiche.
     for lesson in added:
-        if lesson.exact_key not in mapping:
-            mapping[lesson.exact_key] = calendar_insert(service, calendar_id, lesson)
+        if lesson.exact_key in mapping:
+            continue
 
-    # Preserve only IDs that correspond to the currently visible schedule.
+        existing = managed_by_key.get(lesson.exact_key)
+
+        if existing and existing.get("id"):
+            event_id = str(existing["id"])
+            mapping[lesson.exact_key] = event_id
+            known_valid_ids.add(event_id)
+            continue
+
+        event_id = calendar_insert(
+            service,
+            calendar_id,
+            lesson,
+        )
+        mapping[lesson.exact_key] = event_id
+        known_valid_ids.add(event_id)
+
+    # ------------------------------------------------------------------
+    # AUTORIPARAZIONE
+    # ------------------------------------------------------------------
+    # Una lezione può essere invariata su Mercatorum ma il relativo evento
+    # Google Calendar può essere stato cancellato manualmente.
+    #
+    # In quel caso state.enc contiene ancora il vecchio ID: lo rileviamo qui
+    # e ricreiamo l'evento senza generare una falsa notifica Telegram.
+    repaired = 0
+
+    if reconciliation_available:
+        for lesson in new_lessons:
+            key = lesson.exact_key
+            event_id = mapping.get(key)
+
+            # L'ID salvato esiste davvero sul Calendar.
+            if event_id and event_id in known_valid_ids:
+                continue
+
+            # Lo stato può avere un ID vecchio ma Calendar può contenere già
+            # l'evento corretto: recuperiamo il suo ID prima di creare nulla.
+            existing = managed_by_key.get(key)
+
+            if existing and existing.get("id"):
+                recovered_id = str(existing["id"])
+                mapping[key] = recovered_id
+                known_valid_ids.add(recovered_id)
+                continue
+
+            # Nessun evento reale corrispondente: ricreazione effettiva.
+            new_event_id = calendar_insert(
+                service,
+                calendar_id,
+                lesson,
+            )
+
+            mapping[key] = new_event_id
+            known_valid_ids.add(new_event_id)
+            repaired += 1
+
+        if repaired:
+            print(
+                "Calendar: autoriparati "
+                f"{repaired} eventi mancanti."
+            )
+
+    # Manteniamo nello stato solo le didattiche ancora attive per il monitor.
     active = {lesson.exact_key for lesson in new_lessons}
-    return {key: value for key, value in mapping.items() if key in active}
 
+    return {
+        key: value
+        for key, value in mapping.items()
+        if key in active
+    }
 
 def main() -> int:
     state = load_state()

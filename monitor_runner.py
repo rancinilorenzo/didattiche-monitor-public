@@ -40,6 +40,17 @@ JUST_STARTED_GRACE_MINUTES = int(
 )
 LIVE_FOLLOW_UP_MINUTES = (10, 20)
 
+# Un segnale "In corso" non associabile a una lezione programmata deve
+# sopravvivere a due snapshot separati prima di generare un alert.
+GENERIC_LIVE_CONFIRM_CHECKS = max(
+    2,
+    int(os.getenv("GENERIC_LIVE_CONFIRM_CHECKS", "2")),
+)
+GENERIC_LIVE_MAX_GAP_MINUTES = max(
+    5,
+    int(os.getenv("GENERIC_LIVE_MAX_GAP_MINUTES", "12")),
+)
+
 # Anti-Salto v2: interazioni Telegram.
 SNOOZE_MINUTES = int(os.getenv("ANTI_SKIP_SNOOZE_MINUTES", "15"))
 ACK_RECENT_HOURS = int(os.getenv("ANTI_SKIP_ACK_RECENT_HOURS", "24"))
@@ -2197,40 +2208,8 @@ def main() -> int:
         for threshold in due:
             reminded.add(reminder_state_key(lesson, threshold))
 
-    # Recupero se GitHub arriva appena dopo l'orario.
-    if live_present is not True:
-        for lesson in safety_lessons:
-            elapsed = (now - lesson.start_dt).total_seconds() / 60
-            key = anti_skip_state_key(lesson, "just-started")
-            if (
-                0 <= elapsed <= JUST_STARTED_GRACE_MINUTES
-                and now < lesson.end_dt
-                and key not in reminded
-            ):
-                notify_lesson(
-                    "🚨 DIDATTICA APPENA INIZIATA",
-                    (
-                        lesson_card(
-                            lesson,
-                            lesson_meta_for(lesson, new_meta, old_meta),
-                        )
-                        + f"\n\n⚠️ È iniziata da circa **{human_minutes(elapsed)}**."
-                    ),
-                    lesson,
-                    anti_skip_state,
-                    now,
-                    urgent=True,
-                )
-                reminded.add(key)
-
-    # 🔴 In corso + richiami 10/20 minuti.
-    # Se riusciamo a ricondurre "In corso" a una lezione dell'orario,
-    # il messaggio porta gli stessi pulsanti Anti-Salto.
-    live_follow_keys = {
-        minutes: f"{LIVE_STATE_KEY}-follow-up-{minutes}"
-        for minutes in LIVE_FOLLOW_UP_MINUTES
-    }
-
+    # Individua subito un'eventuale lezione programmata che dovrebbe essere
+    # realmente in corso in questo momento.
     current_candidates = [
         lesson
         for lesson in safety_lessons
@@ -2242,16 +2221,170 @@ def main() -> int:
         else None
     )
 
-    if live_present is True:
+    # ------------------------------------------------------------------
+    # CONFERMA TRA RUN PER "IN CORSO" GENERICO
+    # ------------------------------------------------------------------
+    # Se Mercatorum dice soltanto che qualcosa è "In corso", ma non riusciamo
+    # a collegarlo a una lezione programmata nell'orario attuale, non mandiamo
+    # subito Telegram. Richiediamo una seconda rilevazione in un monitor
+    # successivo. Un vero live associabile resta invece immediato.
+    generic_candidate_key = "live_generic_candidate"
+    generic_live_confirmed = False
+
+    if live_present is True and live_lesson is None:
+        candidate = anti_skip_state.get(generic_candidate_key)
+        count = 1
+        first_seen = now
+
+        if isinstance(candidate, dict):
+            try:
+                previous_last_seen = datetime.fromisoformat(
+                    str(candidate.get("last_seen", ""))
+                )
+                if previous_last_seen.tzinfo is None:
+                    previous_last_seen = previous_last_seen.replace(
+                        tzinfo=core.TIMEZONE
+                    )
+
+                gap = now - previous_last_seen
+
+                if gap <= timedelta(
+                    minutes=GENERIC_LIVE_MAX_GAP_MINUTES
+                ):
+                    count = int(candidate.get("count", 0) or 0) + 1
+
+                    try:
+                        first_seen = datetime.fromisoformat(
+                            str(candidate.get("first_seen", ""))
+                        )
+                        if first_seen.tzinfo is None:
+                            first_seen = first_seen.replace(
+                                tzinfo=core.TIMEZONE
+                            )
+                    except Exception:
+                        first_seen = previous_last_seen
+
+            except Exception:
+                count = 1
+                first_seen = now
+
+        anti_skip_state[generic_candidate_key] = {
+            "count": count,
+            "first_seen": first_seen.isoformat(),
+            "last_seen": now.isoformat(),
+        }
+
+        # Se un live era già stato confermato in precedenza e Mercatorum
+        # continua a mostrarlo, non lo rimettiamo in quarantena.
+        generic_live_confirmed = (
+            bool(anti_skip_state.get("live_since"))
+            or count >= GENERIC_LIVE_CONFIRM_CHECKS
+        )
+
+        if not generic_live_confirmed:
+            print(
+                "Segnale 'In corso' generico in attesa di conferma "
+                f"({count}/{GENERIC_LIVE_CONFIRM_CHECKS})."
+            )
+
+    if live_present is True and live_lesson is not None:
+        # Una lezione prevista è effettivamente nell'intervallo orario:
+        # questo è il caso ad alta confidenza e resta immediato.
+        generic_live_confirmed = False
+        anti_skip_state.pop(generic_candidate_key, None)
+
+    if live_present is False:
+        anti_skip_state.pop(generic_candidate_key, None)
+
+    if live_present is None:
+        # Un errore temporaneo nel controllo "In corso" non vale né come
+        # conferma né come smentita. Eliminiamo però candidati ormai vecchi.
+        candidate = anti_skip_state.get(generic_candidate_key)
+
+        if isinstance(candidate, dict):
+            try:
+                last_seen = datetime.fromisoformat(
+                    str(candidate.get("last_seen", ""))
+                )
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(
+                        tzinfo=core.TIMEZONE
+                    )
+
+                if now - last_seen > timedelta(
+                    minutes=GENERIC_LIVE_MAX_GAP_MINUTES
+                ):
+                    anti_skip_state.pop(
+                        generic_candidate_key,
+                        None,
+                    )
+            except Exception:
+                anti_skip_state.pop(
+                    generic_candidate_key,
+                    None,
+                )
+
+    live_confirmed = (
+        live_present is True
+        and (
+            live_lesson is not None
+            or generic_live_confirmed
+        )
+    )
+
+    # Recupero se GitHub arriva appena dopo l'orario.
+    # Un falso segnale generico "In corso" non deve più sopprimere questo
+    # avviso di sicurezza.
+    if not live_confirmed:
+        for lesson in safety_lessons:
+            elapsed = (now - lesson.start_dt).total_seconds() / 60
+            key = anti_skip_state_key(lesson, "just-started")
+
+            if (
+                0 <= elapsed <= JUST_STARTED_GRACE_MINUTES
+                and now < lesson.end_dt
+                and key not in reminded
+            ):
+                notify_lesson(
+                    "🚨 DIDATTICA APPENA INIZIATA",
+                    (
+                        lesson_card(
+                            lesson,
+                            lesson_meta_for(
+                                lesson,
+                                new_meta,
+                                old_meta,
+                            ),
+                        )
+                        + f"\n\n⚠️ È iniziata da circa **{human_minutes(elapsed)}**."
+                    ),
+                    lesson,
+                    anti_skip_state,
+                    now,
+                    urgent=True,
+                )
+                reminded.add(key)
+
+    # 🔴 In corso + richiami 10/20 minuti.
+    live_follow_keys = {
+        minutes: f"{LIVE_STATE_KEY}-follow-up-{minutes}"
+        for minutes in LIVE_FOLLOW_UP_MINUTES
+    }
+
+    if live_confirmed:
         live_since_raw = anti_skip_state.get("live_since")
+
         if not live_since_raw:
             anti_skip_state["live_since"] = now.isoformat()
             live_since = now
-        else:
+
+        if live_since_raw:
             try:
                 live_since = datetime.fromisoformat(live_since_raw)
                 if live_since.tzinfo is None:
-                    live_since = live_since.replace(tzinfo=core.TIMEZONE)
+                    live_since = live_since.replace(
+                        tzinfo=core.TIMEZONE
+                    )
             except Exception:
                 live_since = now
                 anti_skip_state["live_since"] = now.isoformat()
@@ -2269,7 +2402,7 @@ def main() -> int:
                                 old_meta,
                             ),
                         )
-                        + '\n\nMercatorum la segnala nello stato **In corso**.'
+                        + "\n\nMercatorum la segnala nello stato **In corso**."
                         + "\n▶️ È disponibile adesso sulla piattaforma."
                     ),
                     live_lesson,
@@ -2277,18 +2410,24 @@ def main() -> int:
                     now,
                     urgent=True,
                 )
-            else:
+
+            if live_lesson is None:
                 notify_urgent_generic(
                     "🔴 DIDATTICA IN DIRETTA",
                     (
                         'Mercatorum segnala una didattica nello stato "In corso".\n\n'
-                        "▶️ È disponibile adesso sulla piattaforma."
+                        "▶️ Il segnale è stato confermato in due controlli "
+                        "separati. È disponibile adesso sulla piattaforma."
                     ),
                     anti_skip_state,
                 )
+
             reminded.add(LIVE_STATE_KEY)
 
-        live_elapsed = (now - live_since).total_seconds() / 60
+        live_elapsed = (
+            now - live_since
+        ).total_seconds() / 60
+
         live_acknowledged = (
             live_lesson is not None
             and acknowledgement_is_recent(
@@ -2300,48 +2439,56 @@ def main() -> int:
 
         for threshold in LIVE_FOLLOW_UP_MINUTES:
             key = live_follow_keys[threshold]
+
             if (
                 live_elapsed >= threshold
                 and key not in reminded
                 and not live_acknowledged
             ):
                 body = (
-                    "Mercatorum segnala ancora la didattica come **In corso**.\n\n"
-                    "▶️ Se non sei già collegato, controlla subito la piattaforma."
+                    "Mercatorum segnala ancora la didattica come "
+                    "**In corso**.\n\n"
+                    "▶️ Se non sei già collegato, controlla subito "
+                    "la piattaforma."
                 )
 
                 if live_lesson is not None:
                     notify_lesson(
                         f"🚨 DIDATTICA ANCORA IN CORSO · {threshold} MIN",
-                        lesson_card(
-                            live_lesson,
-                            lesson_meta_for(
+                        (
+                            lesson_card(
                                 live_lesson,
-                                new_meta,
-                                old_meta,
-                            ),
-                        )
-                        + "\n\n"
-                        + body,
+                                lesson_meta_for(
+                                    live_lesson,
+                                    new_meta,
+                                    old_meta,
+                                ),
+                            )
+                            + "\n\n"
+                            + body
+                        ),
                         live_lesson,
                         anti_skip_state,
                         now,
                         urgent=True,
                     )
-                else:
+
+                if live_lesson is None:
                     notify_urgent_generic(
                         f"🚨 DIDATTICA ANCORA IN CORSO · {threshold} MIN",
                         body,
                         anti_skip_state,
                     )
+
                 reminded.add(key)
 
-    elif live_present is False:
+    if live_present is False:
         reminded.discard(LIVE_STATE_KEY)
+
         for key in live_follow_keys.values():
             reminded.discard(key)
-        anti_skip_state.pop("live_since", None)
 
+        anti_skip_state.pop("live_since", None)
     # Conserva solo chiavi relative a lezioni attive.
     active_reminders: set[str] = set()
 
@@ -2352,7 +2499,7 @@ def main() -> int:
         active_reminders.add(anti_skip_state_key(lesson, "same-day"))
         active_reminders.add(anti_skip_state_key(lesson, "just-started"))
 
-    if live_present is True or anti_skip_state.get("live_since"):
+    if live_confirmed or anti_skip_state.get("live_since"):
         active_reminders.add(LIVE_STATE_KEY)
         active_reminders.update(live_follow_keys.values())
 

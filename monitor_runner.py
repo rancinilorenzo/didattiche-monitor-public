@@ -147,36 +147,29 @@ def telegram_main_chat_id() -> str:
     return os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 
-def telegram_urgent_chat_id(anti_skip_state: dict | None = None) -> str:
-    configured = os.getenv("TELEGRAM_URGENT_CHAT_ID", "").strip()
-    if configured:
-        return configured
-    if anti_skip_state:
-        return str(anti_skip_state.get("telegram_urgent_chat_id", "")).strip()
+def telegram_urgent_chat_id(
+    anti_skip_state: dict | None = None,
+) -> str:
+    """
+    Modalità group-only: gli alert urgenti non hanno una seconda
+    destinazione privata.
+    """
     return ""
 
-
-def telegram_owner_user_id(anti_skip_state: dict | None = None) -> str:
-    configured = os.getenv("TELEGRAM_OWNER_USER_ID", "").strip()
-    if configured:
-        return configured
-    if anti_skip_state:
-        return str(anti_skip_state.get("telegram_owner_user_id", "")).strip()
+def telegram_owner_user_id(
+    anti_skip_state: dict | None = None,
+) -> str:
+    """
+    Modalità group-only: nessun utente privato proprietario.
+    I callback autorizzati vengono controllati tramite la chat di gruppo.
+    """
     return ""
-
 
 def telegram_allowed_callback_chats(
     anti_skip_state: dict,
 ) -> set[str]:
-    return {
-        value
-        for value in (
-            telegram_main_chat_id(),
-            telegram_urgent_chat_id(anti_skip_state),
-        )
-        if value
-    }
-
+    main_chat = telegram_main_chat_id()
+    return {main_chat} if main_chat else set()
 
 def telegram_send_html(
     title: str,
@@ -329,9 +322,6 @@ def notify_lesson(
     )
 
     targets = [telegram_main_chat_id()]
-    urgent_chat = telegram_urgent_chat_id(anti_skip_state)
-    if urgent and urgent_chat and urgent_chat not in targets:
-        targets.append(urgent_chat)
 
     for chat_id in [x for x in targets if x]:
         try:
@@ -371,9 +361,6 @@ def notify_urgent_generic(
     print(f"{title} — notifica elaborata (dettagli omessi dal log).")
 
     targets = [telegram_main_chat_id()]
-    urgent_chat = telegram_urgent_chat_id(anti_skip_state)
-    if urgent_chat and urgent_chat not in targets:
-        targets.append(urgent_chat)
 
     for chat_id in [x for x in targets if x]:
         try:
@@ -458,109 +445,11 @@ def process_private_telegram_command(
     message: dict,
     anti_skip_state: dict,
 ) -> None:
-    chat = message.get("chat") or {}
-    from_user = message.get("from") or {}
-    text = str(message.get("text", ""))
-    command = private_command_name(text)
-
-    if not command:
-        return
-    if str(chat.get("type", "")) != "private":
-        return
-
-    chat_id = str(chat.get("id", ""))
-    user_id = str(from_user.get("id", ""))
-    if not chat_id or not user_id:
-        return
-
-    configured_owner = os.getenv("TELEGRAM_OWNER_USER_ID", "").strip()
-    state_owner = str(
-        anti_skip_state.get("telegram_owner_user_id", "")
-    ).strip()
-    owner_id = configured_owner or state_owner
-
-    if command in {"/start", "/urgent_on"}:
-        if owner_id and user_id != owner_id:
-            try:
-                telegram_send_html(
-                    "⛔ Accesso non autorizzato",
-                    (
-                        "Questa istanza Anti-Salto è già associata "
-                        "a un altro utente Telegram."
-                    ),
-                    chat_id,
-                )
-            except Exception:
-                pass
-            return
-
-        anti_skip_state["telegram_owner_user_id"] = user_id
-        anti_skip_state["telegram_urgent_chat_id"] = chat_id
-
-        try:
-            telegram_send_html(
-                "🚨 Anti-Salto privato attivato",
-                (
-                    "Questa chat riceverà una copia **solo degli alert urgenti**.\n\n"
-                    "I pulsanti ✅ Preso nota e ⏰ Ricordamelo saranno associati "
-                    "al tuo utente Telegram.\n\n"
-                    "Per disattivare: /urgent_off"
-                ),
-                chat_id,
-            )
-        except Exception as exc:
-            print(
-                "Conferma chat privata Telegram non riuscita: "
-                f"{type(exc).__name__}"
-            )
-        return
-
-    if command == "/urgent_off":
-        if owner_id and user_id != owner_id:
-            return
-
-        if os.getenv("TELEGRAM_URGENT_CHAT_ID", "").strip():
-            body = (
-                "Il canale urgente è configurato tramite GitHub Secret e "
-                "non può essere disattivato da Telegram."
-            )
-        else:
-            anti_skip_state.pop("telegram_urgent_chat_id", None)
-            body = (
-                "La duplicazione privata degli alert urgenti è stata disattivata.\n\n"
-                "Puoi riattivarla con /urgent_on"
-            )
-
-        try:
-            telegram_send_html(
-                "🔕 Anti-Salto privato",
-                body,
-                chat_id,
-            )
-        except Exception:
-            pass
-        return
-
-    if command == "/status":
-        if owner_id and user_id != owner_id:
-            return
-
-        urgent_id = telegram_urgent_chat_id(anti_skip_state)
-        enabled = bool(urgent_id and urgent_id == chat_id)
-        status = "attiva ✅" if enabled else "non attiva"
-        try:
-            telegram_send_html(
-                "🛡️ Stato Anti-Salto",
-                (
-                    f"Duplicazione privata urgente: **{status}**\n"
-                    f"Snooze: **{SNOOZE_MINUTES} min**\n"
-                    "Reminder protetti anche dopo Preso nota: **45 min e 5 min**."
-                ),
-                chat_id,
-            )
-        except Exception:
-            pass
-
+    """
+    Modalità group-only: nessun comando privato può attivare una seconda
+    destinazione Telegram.
+    """
+    return
 
 def process_telegram_updates(
     lessons: list[core.Lesson],
@@ -1914,6 +1803,11 @@ def main() -> int:
     removed_history = list(state.get("removed_history", []))
     old_meta = dict(state.get("lesson_meta", {}))
     anti_skip_state = dict(state.get("anti_skip", {}))
+
+    # Telegram group-only: elimina definitivamente eventuali configurazioni
+    # private salvate dalle vecchie versioni Anti-Salto.
+    anti_skip_state.pop("telegram_owner_user_id", None)
+    anti_skip_state.pop("telegram_urgent_chat_id", None)
 
     silent_calendar_removed: list[core.Lesson] = []
     clean_old_lessons: list[core.Lesson] = []

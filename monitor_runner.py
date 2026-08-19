@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -21,6 +22,14 @@ LIVE_TRANSITION_GRACE_MINUTES = 10
 MISSING_CONFIRM_CHECKS = int(os.getenv("MISSING_CONFIRM_CHECKS", "3"))
 REMOVED_HISTORY_DAYS = int(os.getenv("REMOVED_HISTORY_DAYS", "365"))
 LIVE_STATE_KEY = hashlib.sha1(b"mercatorum-live-present").hexdigest()[:16]
+SNAPSHOT_ATTEMPTS = max(
+    1,
+    int(os.getenv("SNAPSHOT_ATTEMPTS", "3")),
+)
+SNAPSHOT_RETRY_WAIT_SECONDS = max(
+    0,
+    int(os.getenv("SNAPSHOT_RETRY_WAIT_SECONDS", "8")),
+)
 
 # Anti-Salto v1.
 MANDATORY_TELEGRAM_REMINDERS = {120, 45, 15, 5}
@@ -1675,6 +1684,56 @@ def scrape_snapshot() -> tuple[list[core.Lesson], dict[str, dict], bool | None]:
             browser.close()
 
 
+def scrape_snapshot_with_retry(
+    attempts: int = SNAPSHOT_ATTEMPTS,
+    wait_seconds: int = SNAPSHOT_RETRY_WAIT_SECONDS,
+) -> tuple[list[core.Lesson], dict[str, dict], bool | None]:
+    """
+    Retry completo contro errori temporanei di login/rendering Mercatorum.
+    Ogni tentativo usa una nuova sessione browser tramite scrape_snapshot().
+    """
+    attempts = max(1, attempts)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt > 1:
+                print(
+                    "Nuovo tentativo snapshot Mercatorum "
+                    f"{attempt}/{attempts}..."
+                )
+
+            result = scrape_snapshot()
+
+            if attempt > 1:
+                print(
+                    "Snapshot Mercatorum recuperato con successo "
+                    f"al tentativo {attempt}/{attempts}."
+                )
+
+            return result
+
+        except Exception as exc:
+            print(
+                "Snapshot Mercatorum fallito "
+                f"({attempt}/{attempts}): {type(exc).__name__}",
+                file=sys.stderr,
+            )
+
+            if attempt >= attempts:
+                raise
+
+            if wait_seconds > 0:
+                print(
+                    f"Riprovo tra {wait_seconds} secondi "
+                    "con una nuova sessione browser..."
+                )
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Retry snapshot Mercatorum terminato in modo inatteso."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rimozioni, transizioni e recuperi
 # ---------------------------------------------------------------------------
@@ -1879,7 +1938,7 @@ def main() -> int:
             clean_history.append(item)
     removed_history = clean_history
 
-    new_lessons, new_meta, live_present = scrape_snapshot()
+    new_lessons, new_meta, live_present = scrape_snapshot_with_retry()
 
     clean_new_lessons: list[core.Lesson] = []
     clean_new_meta: dict[str, dict] = {}

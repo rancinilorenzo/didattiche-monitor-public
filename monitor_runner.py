@@ -789,6 +789,106 @@ def lesson_meta_for(
     )
 
 
+def match_live_identity_lesson(
+    lessons: list[core.Lesson],
+    new_meta: dict[str, dict],
+    old_meta: dict[str, dict],
+    live_evidence: dict,
+) -> core.Lesson | None:
+    """
+    Prova a riconoscere quale lezione è mostrata nella scheda In corso.
+
+    Priorità:
+    1. stesso ID Mercatorum presente in un link visibile;
+    2. materia/titolo presenti nel testo visibile.
+
+    In caso di ambiguità non indovina: restituisce None.
+    """
+    if not isinstance(live_evidence, dict):
+        return None
+
+    live_text = normalize_identity(
+        str(live_evidence.get("text", ""))
+    )
+
+    live_ids: set[str] = set()
+
+    for href in live_evidence.get("hrefs", []) or []:
+        match = re.search(
+            r"/class/(?:on-demand|test)/([^/?#]+)",
+            str(href),
+            flags=re.IGNORECASE,
+        )
+        if match:
+            live_ids.add(
+                core.normalize_space(match.group(1))
+            )
+
+    scored: list[tuple[int, core.Lesson]] = []
+
+    for lesson in lessons:
+        meta = lesson_meta_for(
+            lesson,
+            new_meta,
+            old_meta,
+        )
+
+        mercatorum_id = core.normalize_space(
+            meta.get("mercatorum_id", "")
+        )
+
+        if mercatorum_id and mercatorum_id in live_ids:
+            scored.append((100, lesson))
+            continue
+
+        subject = normalize_identity(
+            meta.get("subject", "")
+        )
+        title = normalize_identity(
+            meta.get("title", "")
+        )
+        description = normalize_identity(
+            lesson.description
+        )
+
+        score = 0
+
+        if title and len(title) >= 8 and title in live_text:
+            score += 6
+
+        if subject and len(subject) >= 5 and subject in live_text:
+            score += 3
+
+        if (
+            description
+            and len(description) >= 12
+            and description in live_text
+        ):
+            score += 8
+
+        if score >= 6:
+            scored.append((score, lesson))
+
+    if not scored:
+        return None
+
+    scored.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    best_score = scored[0][0]
+    best = [
+        lesson
+        for score, lesson in scored
+        if score == best_score
+    ]
+
+    if len(best) != 1:
+        return None
+
+    return best[0]
+
 def mark_current_notice_as_covered(
     lesson: core.Lesson,
     now: datetime,
@@ -1494,21 +1594,52 @@ def page_live_status(page) -> bool:
     return EMPTY_LIVE_TEXT not in text
 
 
-def detect_live_present(page) -> bool:
+def live_page_evidence(page) -> dict:
+    """
+    Raccoglie informazioni visibili dalla scheda In corso senza scriverle
+    nei log. Servono solo per riconoscere materia/titolo della diretta.
+    """
+    text = core.normalize_space(
+        page.locator("body").inner_text(timeout=15_000)
+    )
+
+    try:
+        hrefs = page.locator("a[href]:visible").evaluate_all(
+            """
+            elements => elements
+              .map(element => element.href || '')
+              .filter(Boolean)
+            """
+        )
+    except Exception:
+        hrefs = []
+
+    return {
+        "text": text,
+        "hrefs": hrefs,
+    }
+
+
+def detect_live_present(page) -> tuple[bool, dict]:
     click_live_tab(page)
+
     first = page_live_status(page)
     if not first:
-        return False
+        return False, {}
 
     page.wait_for_timeout(3000)
-    return page_live_status(page)
 
+    second = page_live_status(page)
+    if not second:
+        return False, {}
+
+    return True, live_page_evidence(page)
 
 # ---------------------------------------------------------------------------
 # Login + snapshot
 # ---------------------------------------------------------------------------
 
-def scrape_snapshot() -> tuple[list[core.Lesson], dict[str, dict], bool | None]:
+def scrape_snapshot() -> tuple[list[core.Lesson], dict[str, dict], bool | None, dict]:
     core.DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
@@ -1558,16 +1689,17 @@ def scrape_snapshot() -> tuple[list[core.Lesson], dict[str, dict], bool | None]:
             lessons, meta_by_key = load_all_programmed(page)
 
             try:
-                live_present = detect_live_present(page)
+                live_present, live_evidence = detect_live_present(page)
             except Exception as exc:
                 print(
                     "Controllo 'In corso' non riuscito: "
                     f"{type(exc).__name__}"
                 )
                 live_present = None
+                live_evidence = {}
 
             core.best_effort_logout(page)
-            return lessons, meta_by_key, live_present
+            return lessons, meta_by_key, live_present, live_evidence
 
         except Exception:
             try:
@@ -1587,7 +1719,7 @@ def scrape_snapshot() -> tuple[list[core.Lesson], dict[str, dict], bool | None]:
 def scrape_snapshot_with_retry(
     attempts: int = SNAPSHOT_ATTEMPTS,
     wait_seconds: int = SNAPSHOT_RETRY_WAIT_SECONDS,
-) -> tuple[list[core.Lesson], dict[str, dict], bool | None]:
+) -> tuple[list[core.Lesson], dict[str, dict], bool | None, dict]:
     """
     Retry completo contro errori temporanei di login/rendering Mercatorum.
     Ogni tentativo usa una nuova sessione browser tramite scrape_snapshot().
@@ -1843,7 +1975,7 @@ def main() -> int:
             clean_history.append(item)
     removed_history = clean_history
 
-    new_lessons, new_meta, live_present = scrape_snapshot_with_retry()
+    new_lessons, new_meta, live_present, live_evidence = scrape_snapshot_with_retry()
 
     clean_new_lessons: list[core.Lesson] = []
     clean_new_meta: dict[str, dict] = {}
@@ -2215,10 +2347,26 @@ def main() -> int:
         for lesson in safety_lessons
         if lesson.start_dt <= now < lesson.end_dt
     ]
-    live_lesson = (
+
+    live_time_lesson = (
         max(current_candidates, key=lambda x: x.start_dt)
         if current_candidates
         else None
+    )
+
+    live_identity_lesson = match_live_identity_lesson(
+        safety_lessons,
+        new_meta,
+        old_meta,
+        live_evidence,
+    )
+
+    # Per mostrare materia/titolo possiamo usare anche l'identità letta
+    # direttamente dalla scheda In corso. La conferma immediata, però,
+    # continua a dipendere solo dalla compatibilità con l'orario.
+    live_lesson = (
+        live_time_lesson
+        or live_identity_lesson
     )
 
     # ------------------------------------------------------------------
@@ -2231,7 +2379,7 @@ def main() -> int:
     generic_candidate_key = "live_generic_candidate"
     generic_live_confirmed = False
 
-    if live_present is True and live_lesson is None:
+    if live_present is True and live_time_lesson is None:
         candidate = anti_skip_state.get(generic_candidate_key)
         count = 1
         first_seen = now
@@ -2287,7 +2435,7 @@ def main() -> int:
                 f"({count}/{GENERIC_LIVE_CONFIRM_CHECKS})."
             )
 
-    if live_present is True and live_lesson is not None:
+    if live_present is True and live_time_lesson is not None:
         # Una lezione prevista è effettivamente nell'intervallo orario:
         # questo è il caso ad alta confidenza e resta immediato.
         generic_live_confirmed = False
@@ -2327,7 +2475,7 @@ def main() -> int:
     live_confirmed = (
         live_present is True
         and (
-            live_lesson is not None
+            live_time_lesson is not None
             or generic_live_confirmed
         )
     )

@@ -18,6 +18,7 @@ permissions:
 concurrency:
   group: mercatorum-monitor
   cancel-in-progress: false
+  queue: max
 
 jobs:
   monitor:

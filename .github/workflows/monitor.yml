@@ -71,10 +71,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-          # Opzionali. Se non esistono, Anti-Salto v2 può registrare
-          # automaticamente la chat privata con /start o /urgent_on.
-          TELEGRAM_URGENT_CHAT_ID: ${{ secrets.TELEGRAM_URGENT_CHAT_ID }}
-          TELEGRAM_OWNER_USER_ID: ${{ secrets.TELEGRAM_OWNER_USER_ID }}
 
         run: python monitor_runner.py
 

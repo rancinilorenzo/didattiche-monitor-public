@@ -63,6 +63,7 @@ jobs:
           ANTI_SKIP_SAME_DAY_HOUR: "8"
           ANTI_SKIP_JUST_STARTED_GRACE_MINUTES: "12"
           ANTI_SKIP_SNOOZE_MINUTES: "15"
+          ANTI_SKIP_SNOOZE_BUTTON_WINDOW_MINUTES: "120"
           ANTI_SKIP_ACK_RECENT_HOURS: "24"
 
           GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
@@ -71,8 +72,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-
-        run: python monitor_runner.py
+        run: python monitor_runner_v3.py
 
       - name: Salva stato cifrato
         if: success()

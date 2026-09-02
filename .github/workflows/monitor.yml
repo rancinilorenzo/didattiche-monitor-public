@@ -28,6 +28,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Python
         uses: actions/setup-python@v6
@@ -66,6 +69,9 @@ jobs:
           ANTI_SKIP_SNOOZE_BUTTON_WINDOW_MINUTES: "120"
           ANTI_SKIP_ACK_RECENT_HOURS: "24"
 
+          PROGRESS_CHECK_INTERVAL_MINUTES: "15"
+          PROGRESS_BONUS_CONFIRM_CHECKS: "2"
+
           GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
 
@@ -87,4 +93,11 @@ jobs:
 
           git add state.enc
           git commit -m "chore: aggiorna stato cifrato [skip ci]"
-          git push
+
+          if git push; then
+            echo "Stato cifrato salvato."
+            exit 0
+          fi
+
+          echo "::warning::main è avanzato durante il run. Non sovrascrivo uno state.enc più nuovo; il prossimo controllo riconcilierà lo stato."
+          exit 0

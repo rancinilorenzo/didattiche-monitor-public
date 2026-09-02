@@ -2769,6 +2769,203 @@ def main_v32() -> int:
 
 
 
+
+# ---------------------------------------------------------------------------
+# Calendar UI v3.3 - Materia / Lezione
+# ---------------------------------------------------------------------------
+
+CALENDAR_LABELS_STATE_KEY = (
+    "calendar_subject_title_v1"
+)
+
+_core_calendar_body_v33 = (
+    core.calendar_body
+)
+
+_legacy_ensure_calendar_safety_reminders_v33 = (
+    legacy.ensure_calendar_safety_reminders
+)
+
+
+def calendar_body_v33(
+    lesson: core.Lesson,
+) -> dict:
+    """
+    Mantiene orari, reminder ed extendedProperties del
+    Calendar originale, modificando soltanto il modo in
+    cui Materia e Lezione vengono presentate.
+    """
+    body = _core_calendar_body_v33(
+        lesson
+    )
+
+    meta = normalize_lesson_meta(
+        lesson,
+        fallback_meta(lesson),
+    )
+
+    subject = core.normalize_space(
+        meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    title = core.normalize_space(
+        meta.get(
+            "title",
+            "",
+        )
+    )
+
+    if not title:
+        title = legacy.lesson_name(
+            lesson
+        )
+
+    if subject:
+        summary = (
+            "🎓 Mercatorum · "
+            f"{subject}"
+        )
+
+        if title:
+            summary += (
+                " · 📘 "
+                f"{title}"
+            )
+
+        description_lines = [
+            f"🎓 Materia: {subject}",
+        ]
+
+        if title:
+            description_lines.append(
+                f"📘 Lezione: {title}"
+            )
+
+        description_lines += [
+            "",
+            "Didattica sincrona Mercatorum.",
+            (
+                "Evento creato e mantenuto automaticamente "
+                "da Mercatorum Sync Monitor."
+            ),
+        ]
+
+        body[
+            "description"
+        ] = "\n".join(
+            description_lines
+        )
+
+    if not subject:
+        summary = (
+            "🎓 Mercatorum · "
+            f"📘 {title}"
+        )
+
+        body[
+            "description"
+        ] = (
+            f"📘 Lezione: {title}\n\n"
+            "Didattica sincrona Mercatorum.\n"
+            "Evento creato e mantenuto automaticamente "
+            "da Mercatorum Sync Monitor."
+        )
+
+    # Evita titoli Calendar eccessivamente lunghi.
+    # La descrizione conserva comunque il testo completo.
+    if len(summary) > 180:
+        summary = (
+            summary[:177]
+            + "…"
+        )
+
+    body[
+        "summary"
+    ] = summary
+
+    return body
+
+
+def ensure_calendar_safety_reminders_v33(
+    lessons: list[core.Lesson],
+    calendar_events: dict[str, str],
+    anti_skip_state: dict,
+) -> None:
+    """
+    Conserva la migrazione reminder già esistente e,
+    una sola volta, aggiorna gli eventi Calendar esistenti
+    al formato Materia / Lezione.
+
+    I futuri eventi useranno automaticamente calendar_body_v33.
+    """
+    _legacy_ensure_calendar_safety_reminders_v33(
+        lessons,
+        calendar_events,
+        anti_skip_state,
+    )
+
+    if anti_skip_state.get(
+        CALENDAR_LABELS_STATE_KEY
+    ):
+        return
+
+    service, calendar_id = (
+        core.google_calendar_service()
+    )
+
+    if service is None:
+        return
+
+    complete = True
+    updated = 0
+
+    for lesson in lessons:
+        event_id = calendar_events.get(
+            lesson.exact_key
+        )
+
+        if not event_id:
+            continue
+
+        try:
+            core.calendar_update(
+                service,
+                calendar_id,
+                event_id,
+                lesson,
+            )
+
+            updated += 1
+
+        except Exception as exc:
+            print(
+                "Aggiornamento etichette Calendar "
+                "non riuscito: "
+                f"{type(exc).__name__}"
+            )
+
+            complete = False
+
+    if not complete:
+        return
+
+    anti_skip_state[
+        CALENDAR_LABELS_STATE_KEY
+    ] = True
+
+    if updated:
+        print(
+            "Calendar: aggiornate etichette "
+            "Materia/Lezione su "
+            f"{updated} eventi."
+        )
+
+
+
+
 # ---------------------------------------------------------------------------
 # Attiva le sostituzioni nel modulo legacy.
 # La logica di monitoraggio rimane quella già collaudata in monitor_runner.py.
@@ -2782,6 +2979,9 @@ legacy.modified_card = modified_card
 legacy.recovery_card = recovery_card
 legacy.notify_recovery_anti_skip = notify_recovery_anti_skip
 legacy.scrape_snapshot = scrape_snapshot_filtered
+
+core.calendar_body = calendar_body_v33
+legacy.ensure_calendar_safety_reminders = ensure_calendar_safety_reminders_v33
 
 
 if __name__ == "__main__":

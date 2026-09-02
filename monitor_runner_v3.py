@@ -845,6 +845,608 @@ def notify_recovery_anti_skip(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Telegram UI v3.1 - riconoscimento ufficiale Materia / Lezione
+# ---------------------------------------------------------------------------
+
+OFFICIAL_MERCATORUM_SUBJECTS = (
+    # Primo anno
+    "Statistical Learning e Analisi dei Big Data",
+    "Sicurezza e protezione dei dati e dei sistemi informatici",
+    "Economia e gestione dell'innovazione",
+    "Tecnologie e sicurezza delle reti di comunicazione",
+    "Elementi di diritto penale e criminalità informatica",
+    "Gestione del rischio e continuità operativa",
+    "Altre conoscenze utili per l'inserimento nel mondo del lavoro",
+    "OFA - Area linguistica",
+    "Lingua inglese",
+
+    # Secondo anno
+    "Cybersecurity",
+    "Informatica giuridica ed etica digitale",
+    "Principi e Metodi di Crittografia",
+    "Informatica Forense e Sicurezza dell'IA",
+    "Metodi Statistici per l'Economia Digitale",
+    "Diritto dei dati e delle informazioni",
+)
+
+
+def _subject_match_text(
+    value: str,
+) -> str:
+    """
+    Normalizzazione usata esclusivamente per confrontare i nomi
+    degli insegnamenti. Non modifica il testo mostrato su Telegram.
+    """
+    return (
+        core.normalize_space(value)
+        .casefold()
+        .replace("’", "'")
+        .replace("`", "'")
+    )
+
+
+def split_official_subject(
+    value: str,
+) -> tuple[str, str] | None:
+    """
+    Cerca un insegnamento ufficiale all'inizio di una stringa del tipo:
+
+        Sicurezza e protezione ... L'architettura della Resilienza
+
+    e restituisce:
+
+        (
+            "Sicurezza e protezione ...",
+            "L'architettura della Resilienza",
+        )
+
+    Si prova prima il nome più lungo per evitare match prematuri.
+    """
+    clean = core.normalize_space(value)
+
+    if not clean:
+        return None
+
+    ordered_subjects = sorted(
+        OFFICIAL_MERCATORUM_SUBJECTS,
+        key=len,
+        reverse=True,
+    )
+
+    clean_match = _subject_match_text(
+        clean
+    )
+
+    for subject in ordered_subjects:
+        official = core.normalize_space(
+            subject
+        )
+
+        official_match = _subject_match_text(
+            official
+        )
+
+        if clean_match == official_match:
+            return official, ""
+
+        if not clean_match.startswith(
+            official_match
+        ):
+            continue
+
+        prefix = clean[:len(official)]
+
+        if (
+            _subject_match_text(prefix)
+            != official_match
+        ):
+            continue
+
+        if (
+            len(clean) > len(official)
+            and not clean[len(official)].isspace()
+        ):
+            continue
+
+        remainder = core.normalize_space(
+            clean[len(official):]
+        )
+
+        return official, remainder
+
+    return None
+
+
+def normalize_lesson_meta(
+    lesson: core.Lesson,
+    meta: dict | None = None,
+) -> dict:
+    """
+    Restituisce sempre la miglior coppia Materia / Lezione disponibile.
+
+    Priorità:
+    1. subject/title già separati dal parser DOM;
+    2. riconoscimento da elenco ufficiale;
+    3. vecchio fallback, senza inventare separazioni.
+    """
+    meta = dict(meta or {})
+
+    subject = core.normalize_space(
+        meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    title = core.normalize_space(
+        meta.get(
+            "title",
+            "",
+        )
+    )
+
+    mercatorum_id = core.normalize_space(
+        meta.get(
+            "mercatorum_id",
+            "",
+        )
+    )
+
+    # Se il parser ha già trovato una materia, preserviamola.
+    # Uniformiamo però la grafia con quella ufficiale, quando possibile.
+    if subject:
+        subject_match = _subject_match_text(
+            subject
+        )
+
+        for official in OFFICIAL_MERCATORUM_SUBJECTS:
+            if (
+                _subject_match_text(official)
+                == subject_match
+            ):
+                subject = official
+                break
+
+        # Protezione contro eventuale titolo che contenga
+        # nuovamente la materia come prefisso.
+        if title:
+            title_split = split_official_subject(
+                title
+            )
+
+            if (
+                title_split is not None
+                and _subject_match_text(
+                    title_split[0]
+                )
+                == _subject_match_text(
+                    subject
+                )
+                and title_split[1]
+            ):
+                title = title_split[1]
+
+        return {
+            "subject": subject,
+            "title": title,
+            "mercatorum_id": mercatorum_id,
+        }
+
+    # Il caso problematico osservato: subject vuoto e title contenente
+    # "Materia Titolo della lezione".
+    candidates = []
+
+    if title:
+        candidates.append(
+            title
+        )
+
+    description = core.normalize_space(
+        lesson.description
+    )
+
+    if (
+        description
+        and description not in candidates
+    ):
+        candidates.append(
+            description
+        )
+
+    for candidate in candidates:
+        split = split_official_subject(
+            candidate
+        )
+
+        if split is None:
+            continue
+
+        detected_subject, detected_title = split
+
+        if detected_title:
+            return {
+                "subject": detected_subject,
+                "title": detected_title,
+                "mercatorum_id": mercatorum_id,
+            }
+
+    # Nessun insegnamento ufficiale riconosciuto:
+    # manteniamo il vecchio comportamento prudente.
+    return {
+        "subject": subject,
+        "title": (
+            title
+            or description
+            or legacy.lesson_name(lesson)
+        ),
+        "mercatorum_id": mercatorum_id,
+    }
+
+
+_legacy_fallback_meta_v3 = legacy.fallback_meta
+
+
+def fallback_meta(
+    lesson: core.Lesson,
+) -> dict:
+    """
+    Fallback V3.1 usato anche durante lo scraping.
+    Se la descrizione comincia con una delle materie ufficiali,
+    ricostruisce subject e title prima di salvare lesson_meta.
+    """
+    original = _legacy_fallback_meta_v3(
+        lesson
+    )
+
+    return normalize_lesson_meta(
+        lesson,
+        original,
+    )
+
+
+def lesson_identity_lines(
+    lesson: core.Lesson,
+    meta: dict | None = None,
+) -> list[str]:
+    clean_meta = normalize_lesson_meta(
+        lesson,
+        meta,
+    )
+
+    subject = core.normalize_space(
+        clean_meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    title = core.normalize_space(
+        clean_meta.get(
+            "title",
+            "",
+        )
+    )
+
+    lines: list[str] = []
+
+    if subject:
+        lines.append(
+            f"🎓 **Materia:** **{subject}**"
+        )
+
+    if title:
+        lines.append(
+            f"📘 **Lezione:** **{title}**"
+        )
+
+    if not subject and not title:
+        lines.append(
+            (
+                "📘 **Lezione:** "
+                f"**{legacy.lesson_name(lesson)}**"
+            )
+        )
+
+    return lines
+
+
+def modified_card(
+    before: core.Lesson,
+    after: core.Lesson,
+    before_meta: dict | None,
+    after_meta: dict | None,
+) -> str:
+    before_meta = normalize_lesson_meta(
+        before,
+        (
+            before_meta
+            or fallback_meta(before)
+        ),
+    )
+
+    after_meta = normalize_lesson_meta(
+        after,
+        (
+            after_meta
+            or fallback_meta(after)
+        ),
+    )
+
+    date_changed = (
+        before.date != after.date
+    )
+
+    time_changed = (
+        (before.start, before.end)
+        !=
+        (after.start, after.end)
+    )
+
+    if date_changed and time_changed:
+        header = (
+            "🗓️🕒 GIORNO E ORARIO MODIFICATI"
+        )
+
+    elif date_changed:
+        header = "🗓️ GIORNO MODIFICATO"
+
+    elif time_changed:
+        header = "🕒 ORARIO MODIFICATO"
+
+    else:
+        header = "✏️ DIDATTICA MODIFICATA"
+
+    old_subject = core.normalize_space(
+        before_meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    old_title = core.normalize_space(
+        before_meta.get(
+            "title",
+            "",
+        )
+    )
+
+    new_subject = core.normalize_space(
+        after_meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    new_title = core.normalize_space(
+        after_meta.get(
+            "title",
+            "",
+        )
+    )
+
+    identity_changed = (
+        legacy.normalize_identity(
+            old_subject
+        )
+        != legacy.normalize_identity(
+            new_subject
+        )
+        or
+        legacy.normalize_identity(
+            old_title
+        )
+        != legacy.normalize_identity(
+            new_title
+        )
+    )
+
+    lines = [
+        header,
+        "",
+        *lesson_identity_lines(
+            after,
+            after_meta,
+        ),
+    ]
+
+    if date_changed or time_changed:
+        lines += [
+            "",
+            "**PRIMA**",
+            *lesson_schedule_lines(
+                before
+            ),
+            "",
+            "**ORA**",
+            *lesson_schedule_lines(
+                after
+            ),
+        ]
+
+    if identity_changed:
+        lines += [
+            "",
+            "**DIDATTICA PRIMA**",
+            *lesson_identity_lines(
+                before,
+                before_meta,
+            ),
+            "",
+            "**DIDATTICA ORA**",
+            *lesson_identity_lines(
+                after,
+                after_meta,
+            ),
+        ]
+
+    return "\n".join(lines)
+
+
+def recovery_card(
+    old_lesson: core.Lesson,
+    new_lesson: core.Lesson,
+    old_meta: dict,
+    new_meta: dict,
+    certain: bool,
+) -> str:
+    old_meta = normalize_lesson_meta(
+        old_lesson,
+        old_meta,
+    )
+
+    new_meta = normalize_lesson_meta(
+        new_lesson,
+        new_meta,
+    )
+
+    old_subject = core.normalize_space(
+        old_meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    old_title = core.normalize_space(
+        old_meta.get(
+            "title",
+            "",
+        )
+    )
+
+    new_subject = core.normalize_space(
+        new_meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    new_title = core.normalize_space(
+        new_meta.get(
+            "title",
+            "",
+        )
+    )
+
+    same_schedule = (
+        old_lesson.date
+        == new_lesson.date
+        and old_lesson.start
+        == new_lesson.start
+        and old_lesson.end
+        == new_lesson.end
+    )
+
+    same_identity = (
+        legacy.normalize_identity(
+            old_subject
+        )
+        == legacy.normalize_identity(
+            new_subject
+        )
+        and
+        legacy.normalize_identity(
+            old_title
+        )
+        == legacy.normalize_identity(
+            new_title
+        )
+    )
+
+    restored = (
+        same_schedule
+        and same_identity
+    )
+
+    if restored:
+        header = (
+            "♻️ DIDATTICA RIPRISTINATA"
+        )
+
+    elif certain:
+        header = (
+            "♻️ DIDATTICA RECUPERATA"
+        )
+
+    else:
+        header = (
+            "♻️ POSSIBILE RECUPERO / "
+            "RIPROGRAMMAZIONE"
+        )
+
+    display_meta = {
+        "subject": (
+            new_subject
+            or old_subject
+        ),
+        "title": (
+            new_title
+            or old_title
+        ),
+    }
+
+    lines = [
+        header,
+        "",
+        *lesson_identity_lines(
+            new_lesson,
+            display_meta,
+        ),
+    ]
+
+    if restored:
+        lines += [
+            "",
+            *lesson_schedule_lines(
+                new_lesson
+            ),
+        ]
+
+        return "\n".join(lines)
+
+    if same_schedule:
+        lines += [
+            "",
+            *lesson_schedule_lines(
+                new_lesson
+            ),
+        ]
+
+    if not same_schedule:
+        lines += [
+            "",
+            "**VECCHIA PROGRAMMAZIONE**",
+            *lesson_schedule_lines(
+                old_lesson
+            ),
+            "",
+            "**NUOVA PROGRAMMAZIONE**",
+            *lesson_schedule_lines(
+                new_lesson
+            ),
+        ]
+
+    if not same_identity:
+        lines += [
+            "",
+            "**DIDATTICA PRIMA**",
+            *lesson_identity_lines(
+                old_lesson,
+                old_meta,
+            ),
+            "",
+            "**DIDATTICA ORA**",
+            *lesson_identity_lines(
+                new_lesson,
+                new_meta,
+            ),
+        ]
+
+    return "\n".join(lines)
+
+
+
 # ---------------------------------------------------------------------------
 # Attiva le sostituzioni nel modulo legacy.
 # La logica di monitoraggio rimane quella già collaudata in monitor_runner.py.
@@ -852,6 +1454,7 @@ def notify_recovery_anti_skip(
 
 legacy.callback_keyboard = callback_keyboard
 legacy.process_telegram_updates = process_telegram_updates
+legacy.fallback_meta = fallback_meta
 legacy.lesson_card = lesson_card
 legacy.modified_card = modified_card
 legacy.recovery_card = recovery_card

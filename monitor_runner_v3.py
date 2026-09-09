@@ -2966,6 +2966,525 @@ def ensure_calendar_safety_reminders_v33(
 
 
 
+
+# ---------------------------------------------------------------------------
+# Matching v3.4 - Materia + Lezione rigorosamente identiche
+# ---------------------------------------------------------------------------
+
+STRICT_IDENTITY_MATCHING_V34 = True
+
+
+def strict_identity_text(
+    value: str,
+) -> str:
+    """
+    Normalizzazione esclusivamente cosmetica.
+
+    Sono equivalenti:
+    - maiuscole/minuscole;
+    - spazi multipli;
+    - apostrofo normale, tipografico e backtick.
+
+    NON eliminiamo parole e NON usiamo percentuali di similarità.
+    """
+    return (
+        core.normalize_space(
+            str(value or "")
+        )
+        .casefold()
+        .replace("’", "'")
+        .replace("`", "'")
+    )
+
+
+def strict_identity_from_meta(
+    lesson: core.Lesson,
+    meta: dict | None = None,
+) -> tuple[str, str] | None:
+    clean_meta = normalize_lesson_meta(
+        lesson,
+        (
+            meta
+            or fallback_meta(lesson)
+        ),
+    )
+
+    subject = strict_identity_text(
+        clean_meta.get(
+            "subject",
+            "",
+        )
+    )
+
+    title = strict_identity_text(
+        clean_meta.get(
+            "title",
+            "",
+        )
+    )
+
+    # Per dichiarare che due didattiche sono la stessa
+    # pretendiamo ENTRAMBI i dati.
+    if not subject:
+        return None
+
+    if not title:
+        return None
+
+    return (
+        subject,
+        title,
+    )
+
+
+def strict_diff_lessons(
+    old: list[core.Lesson],
+    new: list[core.Lesson],
+):
+    """
+    Sostituisce il vecchio matching >=80%.
+
+    Una didattica viene considerata modificata/spostata
+    soltanto quando Materia E Titolo coincidono esattamente
+    dopo la normalizzazione cosmetica.
+
+    In caso di ambiguità tra più occorrenze identiche,
+    non indoviniamo: restano aggiunte/rimosse separate.
+    """
+    old_by_exact = {
+        item.exact_key: item
+        for item in old
+    }
+
+    new_by_exact = {
+        item.exact_key: item
+        for item in new
+    }
+
+    removed = [
+        lesson
+        for key, lesson in old_by_exact.items()
+        if key not in new_by_exact
+    ]
+
+    added = [
+        lesson
+        for key, lesson in new_by_exact.items()
+        if key not in old_by_exact
+    ]
+
+    old_groups: dict[
+        tuple[str, str],
+        list[core.Lesson],
+    ] = {}
+
+    new_groups: dict[
+        tuple[str, str],
+        list[core.Lesson],
+    ] = {}
+
+    for lesson in removed:
+        identity = strict_identity_from_meta(
+            lesson
+        )
+
+        if identity is None:
+            continue
+
+        old_groups.setdefault(
+            identity,
+            [],
+        ).append(
+            lesson
+        )
+
+    for lesson in added:
+        identity = strict_identity_from_meta(
+            lesson
+        )
+
+        if identity is None:
+            continue
+
+        new_groups.setdefault(
+            identity,
+            [],
+        ).append(
+            lesson
+        )
+
+    modified: list[
+        tuple[
+            core.Lesson,
+            core.Lesson,
+        ]
+    ] = []
+
+    paired_old: set[str] = set()
+    paired_new: set[str] = set()
+
+    for identity in (
+        set(old_groups)
+        & set(new_groups)
+    ):
+        old_candidates = old_groups[
+            identity
+        ]
+
+        new_candidates = new_groups[
+            identity
+        ]
+
+        # Sicurezza anti-errore:
+        # se ci sono più possibili corrispondenze
+        # con stesso titolo non scegliamo a caso.
+        if len(old_candidates) != 1:
+            continue
+
+        if len(new_candidates) != 1:
+            continue
+
+        before = old_candidates[0]
+        after = new_candidates[0]
+
+        modified.append(
+            (
+                before,
+                after,
+            )
+        )
+
+        paired_old.add(
+            before.exact_key
+        )
+
+        paired_new.add(
+            after.exact_key
+        )
+
+    remaining_removed = [
+        lesson
+        for lesson in removed
+        if lesson.exact_key
+        not in paired_old
+    ]
+
+    remaining_added = [
+        lesson
+        for lesson in added
+        if lesson.exact_key
+        not in paired_new
+    ]
+
+    modified.sort(
+        key=lambda pair: (
+            pair[1].start_dt,
+            pair[1].end_dt,
+            pair[1].description.casefold(),
+        )
+    )
+
+    return (
+        remaining_added,
+        remaining_removed,
+        modified,
+    )
+
+
+def recovery_score_strict(
+    new_lesson: core.Lesson,
+    new_meta: dict,
+    item: dict,
+) -> tuple[float, bool]:
+    """
+    Anche un recupero dalla cronologia è valido SOLO
+    con stessa Materia + stesso Titolo.
+
+    Lo stesso mercatorum_id aumenta la certezza,
+    ma NON può mai aggirare il controllo identità.
+    """
+    old_lesson = core.lesson_from_dict(
+        item["lesson"]
+    )
+
+    old_meta = item.get(
+        "meta",
+        fallback_meta(
+            old_lesson
+        ),
+    )
+
+    new_identity = (
+        strict_identity_from_meta(
+            new_lesson,
+            new_meta,
+        )
+    )
+
+    old_identity = (
+        strict_identity_from_meta(
+            old_lesson,
+            old_meta,
+        )
+    )
+
+    if new_identity is None:
+        return (
+            0.0,
+            False,
+        )
+
+    if old_identity is None:
+        return (
+            0.0,
+            False,
+        )
+
+    if new_identity != old_identity:
+        return (
+            0.0,
+            False,
+        )
+
+    clean_new_meta = normalize_lesson_meta(
+        new_lesson,
+        new_meta,
+    )
+
+    clean_old_meta = normalize_lesson_meta(
+        old_lesson,
+        old_meta,
+    )
+
+    new_id = core.normalize_space(
+        clean_new_meta.get(
+            "mercatorum_id",
+            "",
+        )
+    )
+
+    old_id = core.normalize_space(
+        clean_old_meta.get(
+            "mercatorum_id",
+            "",
+        )
+    )
+
+    if (
+        new_id
+        and old_id
+        and new_id == old_id
+    ):
+        return (
+            2.0,
+            True,
+        )
+
+    return (
+        1.0,
+        False,
+    )
+
+
+def find_recovery_strict(
+    lesson: core.Lesson,
+    meta: dict,
+    history: list[dict],
+) -> tuple[int | None, bool]:
+    """
+    Ordine:
+
+    1. Materia+Titolo devono essere identici.
+    2. Se c'è lo stesso ID Mercatorum, match certo.
+    3. Se ricompare con identico giorno/orario,
+       preferiamo quell'occorrenza -> RIPRISTINATA.
+    4. Se resta una sola possibile vecchia occorrenza,
+       è una RIPROGRAMMATA.
+    5. Se ne restano più di una, non indoviniamo.
+    """
+    matches: list[
+        tuple[
+            int,
+            core.Lesson,
+            bool,
+        ]
+    ] = []
+
+    for index in range(
+        len(history) - 1,
+        -1,
+        -1,
+    ):
+        score, certain = (
+            recovery_score_strict(
+                lesson,
+                meta,
+                history[index],
+            )
+        )
+
+        if score < 1.0:
+            continue
+
+        try:
+            old_lesson = (
+                core.lesson_from_dict(
+                    history[index][
+                        "lesson"
+                    ]
+                )
+            )
+        except Exception:
+            continue
+
+        matches.append(
+            (
+                index,
+                old_lesson,
+                certain,
+            )
+        )
+
+    if not matches:
+        return (
+            None,
+            False,
+        )
+
+    certain_matches = [
+        item
+        for item in matches
+        if item[2]
+    ]
+
+    if len(certain_matches) == 1:
+        return (
+            certain_matches[0][0],
+            True,
+        )
+
+    if len(certain_matches) > 1:
+        return (
+            None,
+            False,
+        )
+
+    same_schedule = [
+        item
+        for item in matches
+        if (
+            item[1].date
+            == lesson.date
+            and item[1].start
+            == lesson.start
+            and item[1].end
+            == lesson.end
+        )
+    ]
+
+    if len(same_schedule) == 1:
+        return (
+            same_schedule[0][0],
+            False,
+        )
+
+    if len(same_schedule) > 1:
+        return (
+            None,
+            False,
+        )
+
+    if len(matches) == 1:
+        return (
+            matches[0][0],
+            False,
+        )
+
+    # Più vecchie didattiche con identica materia/titolo
+    # e nessun elemento univoco: meglio nuova didattica
+    # che falsa riprogrammazione.
+    return (
+        None,
+        False,
+    )
+
+
+def recovery_card(
+    old_lesson: core.Lesson,
+    new_lesson: core.Lesson,
+    old_meta: dict,
+    new_meta: dict,
+    certain: bool,
+) -> str:
+    """
+    Con il matching V3.4 sappiamo già che materia e titolo
+    sono identici.
+
+    Stessa programmazione  -> RIPRISTINATA
+    Programmazione diversa -> RIPROGRAMMATA
+    """
+    old_meta = normalize_lesson_meta(
+        old_lesson,
+        old_meta,
+    )
+
+    new_meta = normalize_lesson_meta(
+        new_lesson,
+        new_meta,
+    )
+
+    same_schedule = (
+        old_lesson.date
+        == new_lesson.date
+        and old_lesson.start
+        == new_lesson.start
+        and old_lesson.end
+        == new_lesson.end
+    )
+
+    header = (
+        "♻️ DIDATTICA RIPRISTINATA"
+        if same_schedule
+        else "♻️ DIDATTICA RIPROGRAMMATA"
+    )
+
+    lines = [
+        header,
+        "",
+        *lesson_identity_lines(
+            new_lesson,
+            new_meta,
+        ),
+        "",
+    ]
+
+    if same_schedule:
+        lines += (
+            lesson_schedule_lines(
+                new_lesson
+            )
+        )
+
+    if not same_schedule:
+        lines += [
+            "**VECCHIA PROGRAMMAZIONE**",
+            *lesson_schedule_lines(
+                old_lesson
+            ),
+            "",
+            "**NUOVA PROGRAMMAZIONE**",
+            *lesson_schedule_lines(
+                new_lesson
+            ),
+        ]
+
+    return "\n".join(
+        lines
+    )
+
+
+
+
 # ---------------------------------------------------------------------------
 # Attiva le sostituzioni nel modulo legacy.
 # La logica di monitoraggio rimane quella già collaudata in monitor_runner.py.
@@ -2979,6 +3498,11 @@ legacy.modified_card = modified_card
 legacy.recovery_card = recovery_card
 legacy.notify_recovery_anti_skip = notify_recovery_anti_skip
 legacy.scrape_snapshot = scrape_snapshot_filtered
+
+# V3.4: nessun matching per semplice similarità percentuale.
+core.diff_lessons = strict_diff_lessons
+legacy.recovery_score = recovery_score_strict
+legacy.find_recovery = find_recovery_strict
 
 core.calendar_body = calendar_body_v33
 legacy.ensure_calendar_safety_reminders = ensure_calendar_safety_reminders_v33

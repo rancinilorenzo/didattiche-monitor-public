@@ -30,14 +30,8 @@ def main():
                 timeout=45_000,
             )
 
-            core.settle_spa(
-                page,
-                2000,
-            )
-
-            core.login_if_needed(
-                page
-            )
+            core.settle_spa(page, 2000)
+            core.login_if_needed(page)
 
             page.goto(
                 core.SCHEDULE_URL,
@@ -45,10 +39,7 @@ def main():
                 timeout=45_000,
             )
 
-            core.settle_spa(
-                page,
-                2000,
-            )
+            core.settle_spa(page, 2000)
 
             if core.first_visible(
                 page,
@@ -57,9 +48,7 @@ def main():
                     "input[type='password']",
                 ],
             ):
-                core.login_if_needed(
-                    page
-                )
+                core.login_if_needed(page)
 
                 page.goto(
                     core.SCHEDULE_URL,
@@ -67,10 +56,7 @@ def main():
                     timeout=45_000,
                 )
 
-                core.settle_spa(
-                    page,
-                    2000,
-                )
+                core.settle_spa(page, 2000)
 
             if core.first_visible(
                 page,
@@ -98,41 +84,21 @@ def main():
                     "Scheda Terminate non trovata."
                 )
 
-            tab.click(
-                timeout=10_000
-            )
-
-            core.settle_spa(
-                page,
-                2000,
-            )
-
-            waited_for_signal = True
+            tab.click(timeout=10_000)
+            core.settle_spa(page, 2000)
 
             try:
                 page.wait_for_function(
                     r"""
-                    () => {
-                      const text =
-                        (
-                          document.body.innerText ||
-                          ''
-                        )
-                        .replace(/\s+/g, ' ')
-                        .trim();
-
-                      return (
-                        /accedi\s+al\s+test/i.test(text) ||
-                        /in\s+aggiornamento/i.test(text) ||
-                        /%\s*presenza/i.test(text)
-                      );
-                    }
+                    () =>
+                      /accedi\s+al\s+test/i.test(
+                        document.body.innerText || ''
+                      )
                     """,
                     timeout=15_000,
                 )
-
             except PlaywrightTimeoutError:
-                waited_for_signal = False
+                pass
 
             result = page.evaluate(
                 r"""
@@ -142,11 +108,6 @@ def main():
                     .replace(/\s+/g, ' ')
                     .trim();
 
-                  const bodyText =
-                    norm(
-                      document.body.innerText || ''
-                    );
-
                   const all =
                     Array.from(
                       document.querySelectorAll(
@@ -154,337 +115,271 @@ def main():
                       )
                     );
 
-                  const exact =
-                    all.filter(el =>
-                      /^accedi\s+al\s+test$/i.test(
+                  const testLeaves =
+                    all.filter(el => {
+                      const text =
                         norm(
                           el.innerText ||
                           el.textContent
-                        )
-                      )
-                    );
+                        );
 
-                  const contains =
-                    all.filter(el =>
-                      /accedi\s+al\s+test/i.test(
-                        norm(
-                          el.innerText ||
-                          el.textContent
-                        )
-                      )
-                    );
+                      if (
+                        !/^accedi\s+al\s+test$/i
+                        .test(text)
+                      ) {
+                        return false;
+                      }
 
-                  const leaves =
-                    contains.filter(el =>
-                      !Array.from(
+                      return !Array.from(
                         el.children
                       ).some(child =>
-                        /accedi\s+al\s+test/i.test(
+                        /^accedi\s+al\s+test$/i
+                        .test(
                           norm(
                             child.innerText ||
                             child.textContent
                           )
                         )
-                      )
-                    );
+                      );
+                    });
 
-                  const source =
-                    exact.length
-                      ? exact
-                      : leaves;
+                  const rows = [];
+                  const rowSet = new Set();
 
-                  const inspect =
-                    (el, index) => {
+                  for (const leaf of testLeaves) {
+                    let node = leaf;
+                    let row = null;
+                    let depth = 0;
 
-                      const style =
-                        window.getComputedStyle(
-                          el
+                    while (
+                      node.parentElement &&
+                      depth < 18
+                    ) {
+                      node =
+                        node.parentElement;
+
+                      depth++;
+
+                      const text =
+                        norm(
+                          node.innerText ||
+                          ''
                         );
 
-                      const clickable =
-                        el.closest(
-                          [
-                            'button',
-                            'a',
-                            '[role="button"]',
-                            '[tabindex]'
-                          ].join(',')
+                      const hasStart =
+                        /\bInizio\b/i.test(
+                          text
                         );
 
-                      let clickableInfo = null;
+                      const hasEnd =
+                        /\bFine\b/i.test(
+                          text
+                        );
 
-                      if (clickable) {
-                        const clickableStyle =
-                          window.getComputedStyle(
-                            clickable
-                          );
+                      const hasPresence =
+                        /%\s*presenza/i.test(
+                          text
+                        );
 
+                      const hasTest =
+                        /\bTest\b/i.test(
+                          text
+                        );
+
+                      if (
+                        hasStart &&
+                        hasEnd &&
+                        hasPresence &&
+                        hasTest &&
+                        text.length <= 3000
+                      ) {
+                        row = node;
+                        break;
+                      }
+                    }
+
+                    if (!row) {
+                      continue;
+                    }
+
+                    if (rowSet.has(row)) {
+                      continue;
+                    }
+
+                    rowSet.add(row);
+
+                    const text =
+                      norm(
+                        row.innerText ||
+                        ''
+                      );
+
+                    const controls =
+                      Array.from(
+                        row.querySelectorAll(
+                          'a, button, [role="button"]'
+                        )
+                      ).filter(el =>
+                        /accedi\s+al\s+test/i
+                        .test(
+                          norm(
+                            el.innerText ||
+                            el.textContent
+                          )
+                        )
+                      );
+
+                    let activeLinks = 0;
+                    let enabledButtons = 0;
+                    let disabledButtons = 0;
+
+                    for (
+                      const control of controls
+                    ) {
+                      const label =
+                        norm(
+                          control.innerText ||
+                          control.textContent
+                        );
+
+                      if (
+                        !/accedi\s+al\s+test/i
+                        .test(label)
+                      ) {
+                        continue;
+                      }
+
+                      if (
+                        control.tagName === 'A'
+                      ) {
                         const href =
-                          clickable.getAttribute(
+                          control.getAttribute(
                             'href'
                           );
 
-                        clickableInfo = {
-                          same_element:
-                            clickable === el,
-
-                          tag:
-                            clickable.tagName,
-
-                          class_name:
-                            String(
-                              clickable.className ||
-                              ''
-                            ),
-
-                          role:
-                            clickable.getAttribute(
-                              'role'
-                            ),
-
-                          tabindex:
-                            clickable.getAttribute(
-                              'tabindex'
-                            ),
-
-                          disabled_property:
-                            clickable.disabled === true,
-
-                          disabled_selector:
-                            clickable.matches(
-                              ':disabled'
-                            ),
-
-                          disabled_attribute:
-                            clickable.hasAttribute(
-                              'disabled'
-                            ),
-
-                          aria_disabled:
-                            clickable.getAttribute(
-                              'aria-disabled'
-                            ),
-
-                          href_present:
-                            Boolean(href),
-
-                          href_placeholder:
-                            (
-                              href === '#' ||
-                              href === '' ||
-                              (
-                                typeof href ===
-                                  'string' &&
-                                href
-                                .toLowerCase()
-                                .startsWith(
-                                  'javascript:'
-                                )
-                              )
-                            ),
-
-                          onclick_present:
-                            clickable.hasAttribute(
-                              'onclick'
-                            ),
-
-                          pointer_events:
-                            clickableStyle
-                            .pointerEvents,
-
-                          cursor:
-                            clickableStyle.cursor,
-
-                          opacity:
-                            clickableStyle.opacity
-                        };
-                      }
-
-                      let ancestor =
-                        el.parentElement;
-
-                      let depth = 1;
-                      let rowInfo = null;
-
-                      while (
-                        ancestor &&
-                        depth <= 15
-                      ) {
-                        const text =
-                          norm(
-                            ancestor.innerText ||
-                            ''
-                          );
-
-                        const useful =
-                          (
-                            /%\s*presenza/i
-                            .test(text) ||
-                            /\bTest\b/i
-                            .test(text) ||
-                            /\bInizio\b/i
-                            .test(text) ||
-                            /\bFine\b/i
-                            .test(text)
-                          );
-
-                        if (useful) {
-                          rowInfo = {
-                            depth:
-                              depth,
-
-                            tag:
-                              ancestor.tagName,
-
-                            class_name:
-                              String(
-                                ancestor.className ||
-                                ''
-                              ),
-
-                            contains_in_aggiornamento:
-                              /in\s+aggiornamento/i
-                              .test(text),
-
-                            contains_presence:
-                              /%\s*presenza/i
-                              .test(text),
-
-                            contains_test:
-                              /\bTest\b/i
-                              .test(text),
-
-                            contains_start:
-                              /\bInizio\b/i
-                              .test(text),
-
-                            contains_end:
-                              /\bFine\b/i
-                              .test(text),
-
-                            contains_recording:
-                              /registrazione/i
-                              .test(text),
-
-                            text_length:
-                              text.length
-                          };
-
-                          break;
+                        if (
+                          href &&
+                          href !== '#' &&
+                          !href
+                            .toLowerCase()
+                            .startsWith(
+                              'javascript:'
+                            )
+                        ) {
+                          activeLinks++;
                         }
-
-                        ancestor =
-                          ancestor.parentElement;
-
-                        depth++;
                       }
 
-                      return {
-                        index:
-                          index,
+                      if (
+                        control.tagName ===
+                        'BUTTON'
+                      ) {
+                        const disabled =
+                          control.disabled === true ||
+                          control.matches(
+                            ':disabled'
+                          ) ||
+                          control.hasAttribute(
+                            'disabled'
+                          ) ||
+                          control.getAttribute(
+                            'aria-disabled'
+                          ) === 'true';
 
-                        element: {
-                          tag:
-                            el.tagName,
+                        if (disabled) {
+                          disabledButtons++;
+                        } else {
+                          enabledButtons++;
+                        }
+                      }
+                    }
 
-                          class_name:
-                            String(
-                              el.className ||
-                              ''
-                            ),
+                    rows.push({
+                      index:
+                        rows.length,
 
-                          role:
-                            el.getAttribute(
-                              'role'
-                            ),
+                      ancestor_depth:
+                        depth,
 
-                          tabindex:
-                            el.getAttribute(
-                              'tabindex'
-                            ),
+                      row_tag:
+                        row.tagName,
 
-                          disabled_property:
-                            el.disabled === true,
-
-                          disabled_selector:
-                            el.matches(
-                              ':disabled'
-                            ),
-
-                          disabled_attribute:
-                            el.hasAttribute(
-                              'disabled'
-                            ),
-
-                          aria_disabled:
-                            el.getAttribute(
-                              'aria-disabled'
-                            ),
-
-                          pointer_events:
-                            style.pointerEvents,
-
-                          cursor:
-                            style.cursor,
-
-                          opacity:
-                            style.opacity
-                        },
-
-                        clickable_ancestor:
-                          clickableInfo,
-
-                        row_ancestor:
-                          rowInfo
-                      };
-                    };
-
-                  return {
-                    body_signals: {
-                      contains_accedi_al_test:
-                        /accedi\s+al\s+test/i
-                        .test(bodyText),
+                      row_class:
+                        String(
+                          row.className || ''
+                        ),
 
                       contains_in_aggiornamento:
                         /in\s+aggiornamento/i
-                        .test(bodyText),
+                        .test(text),
+
+                      contains_start:
+                        /\bInizio\b/i
+                        .test(text),
+
+                      contains_end:
+                        /\bFine\b/i
+                        .test(text),
 
                       contains_presence:
                         /%\s*presenza/i
-                        .test(bodyText),
+                        .test(text),
 
                       contains_test:
                         /\bTest\b/i
-                        .test(bodyText),
+                        .test(text),
 
-                      body_text_length:
-                        bodyText.length
-                    },
+                      contains_recording:
+                        /registrazione/i
+                        .test(text),
 
-                    exact_text_elements:
-                      exact.length,
+                      has_date_like_text:
+                        /\b\d{1,2}\s+
+                        (?:luned[iì]|marted[iì]|
+                        mercoled[iì]|gioved[iì]|
+                        venerd[iì]|sabato|domenica)
+                        \s+[a-zàèéìòù]+\s+20\d{2}\b/ix
+                        .test(text),
 
-                    containing_elements:
-                      contains.length,
+                      has_start_end_times:
+                        /Inizio\s*\d{1,2}:\d{2}/i
+                        .test(text) &&
+                        /Fine\s*\d{1,2}:\d{2}/i
+                        .test(text),
 
-                    leaf_elements:
-                      leaves.length,
+                      test_controls:
+                        controls.length,
 
-                    candidates:
-                      source
-                      .slice(0, 8)
-                      .map(inspect)
+                      active_links:
+                        activeLinks,
+
+                      enabled_buttons:
+                        enabledButtons,
+
+                      disabled_buttons:
+                        disabledButtons,
+
+                      row_text_length:
+                        text.length
+                    });
+                  }
+
+                  return {
+                    test_leaf_elements:
+                      testLeaves.length,
+
+                    unique_full_rows:
+                      rows.length,
+
+                    rows:
+                      rows.slice(0, 12)
                   };
                 }
                 """
             )
 
-            result[
-                "waited_for_rows_signal"
-            ] = waited_for_signal
-
             print(
-                "=== TERMINATE PROBE V3.5B ==="
+                "=== TERMINATE PROBE V3.5C ==="
             )
 
             print(
@@ -499,9 +394,7 @@ def main():
                 "=== FINE TERMINATE PROBE ==="
             )
 
-            core.best_effort_logout(
-                page
-            )
+            core.best_effort_logout(page)
 
         finally:
             context.close()

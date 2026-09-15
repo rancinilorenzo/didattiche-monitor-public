@@ -334,11 +334,7 @@ def main():
                         .test(text),
 
                       has_date_like_text:
-                        /\b\d{1,2}\s+
-                        (?:luned[iì]|marted[iì]|
-                        mercoled[iì]|gioved[iì]|
-                        venerd[iì]|sabato|domenica)
-                        \s+[a-zàèéìòù]+\s+20\d{2}\b/ix
+                        /\b\d{1,2}\s+(?:luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica)\s+[a-zàèéìòù]+\s+20\d{2}\b/i
                         .test(text),
 
                       has_start_end_times:

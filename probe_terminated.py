@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 
 import monitor as core
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import (
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 
 def main():
@@ -27,8 +30,14 @@ def main():
                 timeout=45_000,
             )
 
-            core.settle_spa(page, 2000)
-            core.login_if_needed(page)
+            core.settle_spa(
+                page,
+                2000,
+            )
+
+            core.login_if_needed(
+                page
+            )
 
             page.goto(
                 core.SCHEDULE_URL,
@@ -36,7 +45,10 @@ def main():
                 timeout=45_000,
             )
 
-            core.settle_spa(page, 2000)
+            core.settle_spa(
+                page,
+                2000,
+            )
 
             if core.first_visible(
                 page,
@@ -45,7 +57,9 @@ def main():
                     "input[type='password']",
                 ],
             ):
-                core.login_if_needed(page)
+                core.login_if_needed(
+                    page
+                )
 
                 page.goto(
                     core.SCHEDULE_URL,
@@ -53,7 +67,10 @@ def main():
                     timeout=45_000,
                 )
 
-                core.settle_spa(page, 2000)
+                core.settle_spa(
+                    page,
+                    2000,
+                )
 
             if core.first_visible(
                 page,
@@ -81,186 +98,394 @@ def main():
                     "Scheda Terminate non trovata."
                 )
 
-            tab.click(timeout=10_000)
-            core.settle_spa(page, 1800)
+            tab.click(
+                timeout=10_000
+            )
+
+            core.settle_spa(
+                page,
+                2000,
+            )
+
+            waited_for_signal = True
+
+            try:
+                page.wait_for_function(
+                    r"""
+                    () => {
+                      const text =
+                        (
+                          document.body.innerText ||
+                          ''
+                        )
+                        .replace(/\s+/g, ' ')
+                        .trim();
+
+                      return (
+                        /accedi\s+al\s+test/i.test(text) ||
+                        /in\s+aggiornamento/i.test(text) ||
+                        /%\s*presenza/i.test(text)
+                      );
+                    }
+                    """,
+                    timeout=15_000,
+                )
+
+            except PlaywrightTimeoutError:
+                waited_for_signal = False
 
             result = page.evaluate(
                 r"""
                 () => {
                   const norm = value =>
                     (value || '')
-                      .replace(/\s+/g, ' ')
-                      .trim();
+                    .replace(/\s+/g, ' ')
+                    .trim();
 
-                  const buttons = Array.from(
-                    document.querySelectorAll(
-                      'button, a, [role="button"]'
-                    )
-                  ).filter(el =>
-                    /accedi\s+al\s+test/i.test(
-                      norm(
-                        el.innerText ||
-                        el.textContent
-                      )
-                    )
-                  );
-
-                  const rows = [];
-                  const seen = new Set();
-
-                  for (const button of buttons) {
-                    let node = button;
-                    let row = null;
-
-                    for (
-                      let depth = 0;
-                      depth < 12 && node.parentElement;
-                      depth++
-                    ) {
-                      node = node.parentElement;
-
-                      const text = norm(
-                        node.innerText || ''
-                      );
-
-                      if (
-                        /\bInizio\b/i.test(text) &&
-                        /\bFine\b/i.test(text) &&
-                        /% presenza/i.test(text) &&
-                        /\bTest\b/i.test(text)
-                      ) {
-                        row = node;
-                        break;
-                      }
-                    }
-
-                    if (!row) {
-                      continue;
-                    }
-
-                    const rowText = norm(
-                      row.innerText || ''
+                  const bodyText =
+                    norm(
+                      document.body.innerText || ''
                     );
 
-                    if (seen.has(rowText)) {
-                      continue;
-                    }
+                  const all =
+                    Array.from(
+                      document.querySelectorAll(
+                        'body *'
+                      )
+                    );
 
-                    seen.add(rowText);
+                  const exact =
+                    all.filter(el =>
+                      /^accedi\s+al\s+test$/i.test(
+                        norm(
+                          el.innerText ||
+                          el.textContent
+                        )
+                      )
+                    );
 
-                    const style =
-                      window.getComputedStyle(button);
+                  const contains =
+                    all.filter(el =>
+                      /accedi\s+al\s+test/i.test(
+                        norm(
+                          el.innerText ||
+                          el.textContent
+                        )
+                      )
+                    );
 
-                    const href =
-                      button.getAttribute('href');
+                  const leaves =
+                    contains.filter(el =>
+                      !Array.from(
+                        el.children
+                      ).some(child =>
+                        /accedi\s+al\s+test/i.test(
+                          norm(
+                            child.innerText ||
+                            child.textContent
+                          )
+                        )
+                      )
+                    );
 
-                    rows.push({
-                      index: rows.length,
+                  const source =
+                    exact.length
+                      ? exact
+                      : leaves;
 
-                      row_signals: {
-                        contains_in_aggiornamento:
-                          /in aggiornamento/i.test(
-                            rowText
-                          ),
+                  const inspect =
+                    (el, index) => {
 
-                        contains_presence_label:
-                          /% presenza/i.test(
-                            rowText
-                          ),
+                      const style =
+                        window.getComputedStyle(
+                          el
+                        );
 
-                        contains_test_label:
-                          /\bTest\b/i.test(
-                            rowText
-                          ),
+                      const clickable =
+                        el.closest(
+                          [
+                            'button',
+                            'a',
+                            '[role="button"]',
+                            '[tabindex]'
+                          ].join(',')
+                        );
 
-                        contains_recording:
-                          /registrazione/i.test(
-                            rowText
-                          ),
+                      let clickableInfo = null;
 
-                        row_text_length:
-                          rowText.length
-                      },
+                      if (clickable) {
+                        const clickableStyle =
+                          window.getComputedStyle(
+                            clickable
+                          );
 
-                      test_button: {
-                        tag:
-                          button.tagName,
+                        const href =
+                          clickable.getAttribute(
+                            'href'
+                          );
 
-                        disabled_property:
-                          button.disabled === true,
+                        clickableInfo = {
+                          same_element:
+                            clickable === el,
 
-                        disabled_matches_selector:
-                          button.matches(':disabled'),
+                          tag:
+                            clickable.tagName,
 
-                        disabled_attribute:
-                          button.hasAttribute(
-                            'disabled'
-                          ),
+                          class_name:
+                            String(
+                              clickable.className ||
+                              ''
+                            ),
 
-                        aria_disabled:
-                          button.getAttribute(
-                            'aria-disabled'
-                          ),
+                          role:
+                            clickable.getAttribute(
+                              'role'
+                            ),
 
-                        class_name:
-                          String(
-                            button.className || ''
-                          ),
+                          tabindex:
+                            clickable.getAttribute(
+                              'tabindex'
+                            ),
 
-                        role:
-                          button.getAttribute('role'),
+                          disabled_property:
+                            clickable.disabled === true,
 
-                        tabindex:
-                          button.getAttribute(
-                            'tabindex'
-                          ),
+                          disabled_selector:
+                            clickable.matches(
+                              ':disabled'
+                            ),
 
-                        href_present:
-                          Boolean(href),
+                          disabled_attribute:
+                            clickable.hasAttribute(
+                              'disabled'
+                            ),
 
-                        href_is_placeholder:
-                          href === '#' ||
-                          href === '' ||
-                          (
-                            typeof href === 'string' &&
-                            href.toLowerCase().startsWith(
-                              'javascript:'
-                            )
-                          ),
+                          aria_disabled:
+                            clickable.getAttribute(
+                              'aria-disabled'
+                            ),
 
-                        onclick_present:
-                          button.hasAttribute(
-                            'onclick'
-                          ),
+                          href_present:
+                            Boolean(href),
 
-                        pointer_events:
-                          style.pointerEvents,
+                          href_placeholder:
+                            (
+                              href === '#' ||
+                              href === '' ||
+                              (
+                                typeof href ===
+                                  'string' &&
+                                href
+                                .toLowerCase()
+                                .startsWith(
+                                  'javascript:'
+                                )
+                              )
+                            ),
 
-                        cursor:
-                          style.cursor,
+                          onclick_present:
+                            clickable.hasAttribute(
+                              'onclick'
+                            ),
 
-                        opacity:
-                          style.opacity
+                          pointer_events:
+                            clickableStyle
+                            .pointerEvents,
+
+                          cursor:
+                            clickableStyle.cursor,
+
+                          opacity:
+                            clickableStyle.opacity
+                        };
                       }
-                    });
 
-                    if (rows.length >= 8) {
-                      break;
-                    }
-                  }
+                      let ancestor =
+                        el.parentElement;
+
+                      let depth = 1;
+                      let rowInfo = null;
+
+                      while (
+                        ancestor &&
+                        depth <= 15
+                      ) {
+                        const text =
+                          norm(
+                            ancestor.innerText ||
+                            ''
+                          );
+
+                        const useful =
+                          (
+                            /%\s*presenza/i
+                            .test(text) ||
+                            /\bTest\b/i
+                            .test(text) ||
+                            /\bInizio\b/i
+                            .test(text) ||
+                            /\bFine\b/i
+                            .test(text)
+                          );
+
+                        if (useful) {
+                          rowInfo = {
+                            depth:
+                              depth,
+
+                            tag:
+                              ancestor.tagName,
+
+                            class_name:
+                              String(
+                                ancestor.className ||
+                                ''
+                              ),
+
+                            contains_in_aggiornamento:
+                              /in\s+aggiornamento/i
+                              .test(text),
+
+                            contains_presence:
+                              /%\s*presenza/i
+                              .test(text),
+
+                            contains_test:
+                              /\bTest\b/i
+                              .test(text),
+
+                            contains_start:
+                              /\bInizio\b/i
+                              .test(text),
+
+                            contains_end:
+                              /\bFine\b/i
+                              .test(text),
+
+                            contains_recording:
+                              /registrazione/i
+                              .test(text),
+
+                            text_length:
+                              text.length
+                          };
+
+                          break;
+                        }
+
+                        ancestor =
+                          ancestor.parentElement;
+
+                        depth++;
+                      }
+
+                      return {
+                        index:
+                          index,
+
+                        element: {
+                          tag:
+                            el.tagName,
+
+                          class_name:
+                            String(
+                              el.className ||
+                              ''
+                            ),
+
+                          role:
+                            el.getAttribute(
+                              'role'
+                            ),
+
+                          tabindex:
+                            el.getAttribute(
+                              'tabindex'
+                            ),
+
+                          disabled_property:
+                            el.disabled === true,
+
+                          disabled_selector:
+                            el.matches(
+                              ':disabled'
+                            ),
+
+                          disabled_attribute:
+                            el.hasAttribute(
+                              'disabled'
+                            ),
+
+                          aria_disabled:
+                            el.getAttribute(
+                              'aria-disabled'
+                            ),
+
+                          pointer_events:
+                            style.pointerEvents,
+
+                          cursor:
+                            style.cursor,
+
+                          opacity:
+                            style.opacity
+                        },
+
+                        clickable_ancestor:
+                          clickableInfo,
+
+                        row_ancestor:
+                          rowInfo
+                      };
+                    };
 
                   return {
-                    number_of_test_buttons:
-                      buttons.length,
+                    body_signals: {
+                      contains_accedi_al_test:
+                        /accedi\s+al\s+test/i
+                        .test(bodyText),
 
-                    sampled_rows:
-                      rows
+                      contains_in_aggiornamento:
+                        /in\s+aggiornamento/i
+                        .test(bodyText),
+
+                      contains_presence:
+                        /%\s*presenza/i
+                        .test(bodyText),
+
+                      contains_test:
+                        /\bTest\b/i
+                        .test(bodyText),
+
+                      body_text_length:
+                        bodyText.length
+                    },
+
+                    exact_text_elements:
+                      exact.length,
+
+                    containing_elements:
+                      contains.length,
+
+                    leaf_elements:
+                      leaves.length,
+
+                    candidates:
+                      source
+                      .slice(0, 8)
+                      .map(inspect)
                   };
                 }
                 """
             )
 
-            print("=== TERMINATE PROBE V3.5A ===")
+            result[
+                "waited_for_rows_signal"
+            ] = waited_for_signal
+
+            print(
+                "=== TERMINATE PROBE V3.5B ==="
+            )
 
             print(
                 json.dumps(
@@ -270,9 +495,13 @@ def main():
                 )
             )
 
-            print("=== FINE TERMINATE PROBE ===")
+            print(
+                "=== FINE TERMINATE PROBE ==="
+            )
 
-            core.best_effort_logout(page)
+            core.best_effort_logout(
+                page
+            )
 
         finally:
             context.close()

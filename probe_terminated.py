@@ -1,12 +1,89 @@
 from __future__ import annotations
 
 import json
+import re
 
 import monitor as core
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
+
+
+def terminated_blocks(body_text: str) -> list[dict]:
+    text = core.normalize_space(
+        body_text
+    )
+
+    matches = list(
+        core.DATE_RE.finditer(
+            text
+        )
+    )
+
+    result: list[dict] = []
+
+    for index, match in enumerate(
+        matches
+    ):
+        block_end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+
+        block = text[
+            match.start():block_end
+        ]
+
+        time_match = (
+            core.TIME_RE.search(
+                block
+            )
+        )
+
+        if time_match is None:
+            continue
+
+        low = block.casefold()
+
+        result.append(
+            {
+                "index": len(result),
+
+                "contains_in_aggiornamento":
+                    "in aggiornamento"
+                    in low,
+
+                "contains_accedi_al_test":
+                    "accedi al test"
+                    in low,
+
+                "contains_test_label":
+                    bool(
+                        re.search(
+                            r"\btest\b",
+                            block,
+                            re.IGNORECASE,
+                        )
+                    ),
+
+                "contains_presence":
+                    bool(
+                        re.search(
+                            r"%\s*presenza",
+                            block,
+                            re.IGNORECASE,
+                        )
+                    ),
+
+                "contains_recording":
+                    "registrazione"
+                    in low,
+            }
+        )
+
+    return result
 
 
 def main():
@@ -30,8 +107,14 @@ def main():
                 timeout=45_000,
             )
 
-            core.settle_spa(page, 2000)
-            core.login_if_needed(page)
+            core.settle_spa(
+                page,
+                2000,
+            )
+
+            core.login_if_needed(
+                page
+            )
 
             page.goto(
                 core.SCHEDULE_URL,
@@ -39,7 +122,10 @@ def main():
                 timeout=45_000,
             )
 
-            core.settle_spa(page, 2000)
+            core.settle_spa(
+                page,
+                2000,
+            )
 
             if core.first_visible(
                 page,
@@ -48,7 +134,9 @@ def main():
                     "input[type='password']",
                 ],
             ):
-                core.login_if_needed(page)
+                core.login_if_needed(
+                    page
+                )
 
                 page.goto(
                     core.SCHEDULE_URL,
@@ -56,7 +144,10 @@ def main():
                     timeout=45_000,
                 )
 
-                core.settle_spa(page, 2000)
+                core.settle_spa(
+                    page,
+                    2000,
+                )
 
             if core.first_visible(
                 page,
@@ -84,8 +175,14 @@ def main():
                     "Scheda Terminate non trovata."
                 )
 
-            tab.click(timeout=10_000)
-            core.settle_spa(page, 2000)
+            tab.click(
+                timeout=10_000
+            )
+
+            core.settle_spa(
+                page,
+                2000,
+            )
 
             try:
                 page.wait_for_function(
@@ -97,10 +194,22 @@ def main():
                     """,
                     timeout=15_000,
                 )
+
             except PlaywrightTimeoutError:
                 pass
 
-            result = page.evaluate(
+            body_text = (
+                page.locator("body")
+                .inner_text(
+                    timeout=15_000
+                )
+            )
+
+            blocks = terminated_blocks(
+                body_text
+            )
+
+            controls = page.evaluate(
                 r"""
                 () => {
                   const norm = value =>
@@ -115,7 +224,7 @@ def main():
                       )
                     );
 
-                  const testLeaves =
+                  const leaves =
                     all.filter(el => {
                       const text =
                         norm(
@@ -130,252 +239,190 @@ def main():
                         return false;
                       }
 
-                      return !Array.from(
-                        el.children
-                      ).some(child =>
-                        /^accedi\s+al\s+test$/i
-                        .test(
-                          norm(
-                            child.innerText ||
-                            child.textContent
+                      const childHasSameText =
+                        Array.from(
+                          el.children
+                        ).some(child =>
+                          /^accedi\s+al\s+test$/i
+                          .test(
+                            norm(
+                              child.innerText ||
+                              child.textContent
+                            )
                           )
-                        )
+                        );
+
+                      if (childHasSameText) {
+                        return false;
+                      }
+
+                      const style =
+                        window.getComputedStyle(
+                          el
+                        );
+
+                      return (
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden'
                       );
                     });
 
-                  const rows = [];
-                  const rowSet = new Set();
+                  return leaves.map(
+                    (leaf, index) => {
+                      const control =
+                        leaf.closest(
+                          [
+                            'button',
+                            'a',
+                            '[role="button"]',
+                            '[tabindex]'
+                          ].join(',')
+                        ) || leaf;
 
-                  for (const leaf of testLeaves) {
-                    let node = leaf;
-                    let row = null;
-                    let depth = 0;
-
-                    while (
-                      node.parentElement &&
-                      depth < 18
-                    ) {
-                      node =
-                        node.parentElement;
-
-                      depth++;
-
-                      const text =
-                        norm(
-                          node.innerText ||
-                          ''
+                      const style =
+                        window.getComputedStyle(
+                          control
                         );
 
-                      const hasStart =
-                        /\bInizio\b/i.test(
-                          text
+                      const ariaDisabled =
+                        control.getAttribute(
+                          'aria-disabled'
                         );
 
-                      const hasEnd =
-                        /\bFine\b/i.test(
-                          text
+                      const disabled =
+                        control.disabled === true ||
+                        control.matches(
+                          ':disabled'
+                        ) ||
+                        control.hasAttribute(
+                          'disabled'
+                        ) ||
+                        ariaDisabled === 'true' ||
+                        style.pointerEvents ===
+                          'none';
+
+                      const href =
+                        control.getAttribute(
+                          'href'
                         );
 
-                      const hasPresence =
-                        /%\s*presenza/i.test(
-                          text
-                        );
-
-                      const hasTest =
-                        /\bTest\b/i.test(
-                          text
-                        );
-
-                      if (
-                        hasStart &&
-                        hasEnd &&
-                        hasPresence &&
-                        hasTest &&
-                        text.length <= 3000
-                      ) {
-                        row = node;
-                        break;
-                      }
-                    }
-
-                    if (!row) {
-                      continue;
-                    }
-
-                    if (rowSet.has(row)) {
-                      continue;
-                    }
-
-                    rowSet.add(row);
-
-                    const text =
-                      norm(
-                        row.innerText ||
-                        ''
-                      );
-
-                    const controls =
-                      Array.from(
-                        row.querySelectorAll(
-                          'a, button, [role="button"]'
-                        )
-                      ).filter(el =>
-                        /accedi\s+al\s+test/i
-                        .test(
-                          norm(
-                            el.innerText ||
-                            el.textContent
-                          )
-                        )
-                      );
-
-                    let activeLinks = 0;
-                    let enabledButtons = 0;
-                    let disabledButtons = 0;
-
-                    for (
-                      const control of controls
-                    ) {
-                      const label =
-                        norm(
-                          control.innerText ||
-                          control.textContent
-                        );
-
-                      if (
-                        !/accedi\s+al\s+test/i
-                        .test(label)
-                      ) {
-                        continue;
-                      }
-
-                      if (
-                        control.tagName === 'A'
-                      ) {
-                        const href =
-                          control.getAttribute(
-                            'href'
+                      const validHref =
+                        Boolean(href) &&
+                        href !== '#' &&
+                        href !== '' &&
+                        !href
+                          .toLowerCase()
+                          .startsWith(
+                            'javascript:'
                           );
 
-                        if (
-                          href &&
-                          href !== '#' &&
-                          !href
-                            .toLowerCase()
-                            .startsWith(
-                              'javascript:'
-                            )
-                        ) {
-                          activeLinks++;
-                        }
-                      }
+                      let active = false;
 
                       if (
                         control.tagName ===
                         'BUTTON'
                       ) {
-                        const disabled =
-                          control.disabled === true ||
-                          control.matches(
-                            ':disabled'
-                          ) ||
-                          control.hasAttribute(
-                            'disabled'
-                          ) ||
-                          control.getAttribute(
-                            'aria-disabled'
-                          ) === 'true';
-
-                        if (disabled) {
-                          disabledButtons++;
-                        } else {
-                          enabledButtons++;
-                        }
+                        active =
+                          !disabled;
                       }
+
+                      if (
+                        control.tagName ===
+                        'A'
+                      ) {
+                        active =
+                          !disabled &&
+                          validHref;
+                      }
+
+                      if (
+                        control.tagName !==
+                          'BUTTON' &&
+                        control.tagName !==
+                          'A'
+                      ) {
+                        active =
+                          !disabled &&
+                          (
+                            control.getAttribute(
+                              'role'
+                            ) === 'button' ||
+                            control.hasAttribute(
+                              'tabindex'
+                            )
+                          );
+                      }
+
+                      return {
+                        index:
+                          index,
+
+                        tag:
+                          control.tagName,
+
+                        active:
+                          active,
+
+                        disabled:
+                          disabled,
+
+                        href_present:
+                          Boolean(href),
+
+                        valid_href:
+                          validHref,
+
+                        aria_disabled:
+                          ariaDisabled,
+
+                        pointer_events:
+                          style.pointerEvents,
+
+                        opacity:
+                          style.opacity
+                      };
                     }
-
-                    rows.push({
-                      index:
-                        rows.length,
-
-                      ancestor_depth:
-                        depth,
-
-                      row_tag:
-                        row.tagName,
-
-                      row_class:
-                        String(
-                          row.className || ''
-                        ),
-
-                      contains_in_aggiornamento:
-                        /in\s+aggiornamento/i
-                        .test(text),
-
-                      contains_start:
-                        /\bInizio\b/i
-                        .test(text),
-
-                      contains_end:
-                        /\bFine\b/i
-                        .test(text),
-
-                      contains_presence:
-                        /%\s*presenza/i
-                        .test(text),
-
-                      contains_test:
-                        /\bTest\b/i
-                        .test(text),
-
-                      contains_recording:
-                        /registrazione/i
-                        .test(text),
-
-                      has_date_like_text:
-                        /\b\d{1,2}\s+(?:luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica)\s+[a-zàèéìòù]+\s+20\d{2}\b/i
-                        .test(text),
-
-                      has_start_end_times:
-                        /Inizio\s*\d{1,2}:\d{2}/i
-                        .test(text) &&
-                        /Fine\s*\d{1,2}:\d{2}/i
-                        .test(text),
-
-                      test_controls:
-                        controls.length,
-
-                      active_links:
-                        activeLinks,
-
-                      enabled_buttons:
-                        enabledButtons,
-
-                      disabled_buttons:
-                        disabledButtons,
-
-                      row_text_length:
-                        text.length
-                    });
-                  }
-
-                  return {
-                    test_leaf_elements:
-                      testLeaves.length,
-
-                    unique_full_rows:
-                      rows.length,
-
-                    rows:
-                      rows.slice(0, 12)
-                  };
+                  );
                 }
                 """
             )
 
+            counts_match = (
+                len(blocks)
+                == len(controls)
+                and len(blocks) > 0
+            )
+
+            pairs = []
+
+            if counts_match:
+                for index in range(
+                    len(blocks)
+                ):
+                    pairs.append(
+                        {
+                            "index": index,
+                            "block": blocks[index],
+                            "control": controls[index],
+                        }
+                    )
+
+            result = {
+                "terminated_blocks":
+                    len(blocks),
+
+                "test_controls":
+                    len(controls),
+
+                "counts_match":
+                    counts_match,
+
+                "pairs":
+                    pairs,
+            }
+
             print(
-                "=== TERMINATE PROBE V3.5C ==="
+                "=== TERMINATE PROBE V3.5D ==="
             )
 
             print(
@@ -390,7 +437,9 @@ def main():
                 "=== FINE TERMINATE PROBE ==="
             )
 
-            core.best_effort_logout(page)
+            core.best_effort_logout(
+                page
+            )
 
         finally:
             context.close()

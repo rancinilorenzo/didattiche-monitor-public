@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 
 import monitor_runner_v3 as v3
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+
+def norm(value: str) -> str:
+    return (
+        v3.core.normalize_space(value)
+        .casefold()
+        .replace("’", "'")
+        .replace("`", "'")
+    )
 
 
 def main() -> None:
@@ -36,10 +47,7 @@ def main() -> None:
 
             if v3.core.first_visible(
                 page,
-                [
-                    "#password",
-                    "input[type='password']",
-                ],
+                ["#password", "input[type='password']"],
             ):
                 v3.core.login_if_needed(page)
                 page.goto(
@@ -51,14 +59,9 @@ def main() -> None:
 
             if v3.core.first_visible(
                 page,
-                [
-                    "#password",
-                    "input[type='password']",
-                ],
+                ["#password", "input[type='password']"],
             ):
-                raise RuntimeError(
-                    "Mercatorum mostra ancora la pagina di login."
-                )
+                raise RuntimeError("Login ancora visibile.")
 
             tab = v3.core.first_visible(
                 page,
@@ -69,138 +72,143 @@ def main() -> None:
                     "text=Terminate",
                 ],
             )
-
             if tab is None:
-                raise RuntimeError(
-                    "Scheda Terminate non trovata."
-                )
+                raise RuntimeError("Scheda Terminate non trovata.")
 
             tab.click(timeout=10_000)
             v3.core.settle_spa(page, 2000)
 
-            accedi_seen = False
-
             try:
                 page.wait_for_function(
                     r"""
-                    () =>
-                      /accedi\s+al\s+test/i.test(
-                        document.body.innerText || ''
-                      )
+                    () => /accedi\s+al\s+test/i.test(
+                      document.body.innerText || ''
+                    )
                     """,
                     timeout=15_000,
                 )
-                accedi_seen = True
             except PlaywrightTimeoutError:
                 pass
 
-            body_text = page.locator(
-                "body"
-            ).inner_text(timeout=15_000)
+            body_text = page.locator("body").inner_text(timeout=15_000)
+            text = v3.core.normalize_space(body_text)
+            date_matches = list(v3.core.DATE_RE.finditer(text))
 
-            blocks = v3.terminated_blocks_v35(
-                body_text
-            )
-            controls = v3.terminated_test_controls_v35(
-                page
-            )
-
-            parsed = 0
-            required_signals = 0
-            updating = 0
-            active = 0
-            identities = []
-
-            for block in blocks:
-                lesson = block.get("lesson")
-                meta = block.get("meta")
-
-                if (
-                    isinstance(lesson, v3.core.Lesson)
-                    and isinstance(meta, dict)
-                ):
-                    identity = v3.strict_identity_from_meta(
-                        lesson,
-                        meta,
-                    )
-
-                    if identity is not None:
-                        parsed += 1
-                        identities.append(
-                            (
-                                lesson.date,
-                                lesson.start,
-                                lesson.end,
-                                identity[0],
-                                identity[1],
-                            )
-                        )
-
-                if all(
-                    [
-                        block.get("contains_accedi_al_test"),
-                        block.get("contains_test_label"),
-                        block.get("contains_presence"),
-                        block.get("contains_recording"),
-                    ]
-                ):
-                    required_signals += 1
-
-                if block.get("contains_in_aggiornamento"):
-                    updating += 1
-
-            for control in controls:
-                if control.get("active") is True:
-                    active += 1
-
-            result = {
-                "accedi_al_test_seen_after_wait": accedi_seen,
-                "terminated_blocks": len(blocks),
-                "test_controls": len(controls),
-                "counts_match": (
-                    len(blocks) > 0
-                    and len(blocks) == len(controls)
-                ),
-                "parsed_identities": parsed,
-                "all_rows_parsed": (
-                    len(blocks) > 0
-                    and parsed == len(blocks)
-                ),
-                "rows_with_required_signals": required_signals,
-                "all_required_signals_present": (
-                    len(blocks) > 0
-                    and required_signals == len(blocks)
-                ),
-                "unique_identity_schedules": len(set(identities)),
-                "all_identity_schedules_unique": (
-                    len(blocks) > 0
-                    and len(set(identities)) == len(blocks)
-                ),
-                "active_test_controls": active,
-                "updating_rows": updating,
+            rows = []
+            stages = {
+                "date_time_rows": 0,
+                "subject_at_start": 0,
+                "subject_later": 0,
+                "no_official_subject_found": 0,
+                "presence_after_start_subject": 0,
+                "test_column_after_start_subject": 0,
+                "nonempty_title_after_start_subject": 0,
             }
 
-            print("=== TERMINATE PROBE V3.5G ===")
-            print(
-                json.dumps(
-                    result,
-                    ensure_ascii=False,
-                    indent=2,
+            for index, match in enumerate(date_matches):
+                block_end = (
+                    date_matches[index + 1].start()
+                    if index + 1 < len(date_matches)
+                    else len(text)
                 )
-            )
+                block = text[match.start():block_end]
+                time_match = v3.core.TIME_RE.search(block)
+                if time_match is None:
+                    continue
+
+                stages["date_time_rows"] += 1
+                tail = v3.core.normalize_space(block[time_match.end():])
+                tail_norm = norm(tail)
+
+                split = v3.split_official_subject(tail)
+                if split is not None:
+                    stages["subject_at_start"] += 1
+                    subject, remainder = split
+                    presence = re.search(
+                        r"%\s*presenza\b",
+                        remainder,
+                        flags=re.IGNORECASE,
+                    )
+                    if presence is not None:
+                        stages["presence_after_start_subject"] += 1
+                        before_presence = remainder[:presence.start()]
+                        tests = list(
+                            re.finditer(
+                                r"\bTest\b",
+                                before_presence,
+                                flags=re.IGNORECASE,
+                            )
+                        )
+                        if tests:
+                            stages["test_column_after_start_subject"] += 1
+                            title = v3.core.normalize_space(
+                                before_presence[:tests[-1].start()]
+                            )
+                            updating = re.search(
+                                r"\bIn\s+aggiornamento\b",
+                                title,
+                                flags=re.IGNORECASE,
+                            )
+                            if updating is not None:
+                                title = v3.core.normalize_space(
+                                    title[:updating.start()]
+                                )
+                            if title:
+                                stages["nonempty_title_after_start_subject"] += 1
+
+                    rows.append({
+                        "row": len(rows),
+                        "subject_position": "start",
+                        "prefix_words": 0,
+                        "prefix_group": None,
+                    })
+                    continue
+
+                earliest = None
+                for subject in v3.OFFICIAL_MERCATORUM_SUBJECTS:
+                    subject_norm = norm(subject)
+                    pos = tail_norm.find(subject_norm)
+                    if pos < 0:
+                        continue
+                    if earliest is None or pos < earliest:
+                        earliest = pos
+
+                if earliest is None:
+                    stages["no_official_subject_found"] += 1
+                    rows.append({
+                        "row": len(rows),
+                        "subject_position": "not_found",
+                        "prefix_words": None,
+                        "prefix_group": None,
+                    })
+                    continue
+
+                stages["subject_later"] += 1
+                prefix = tail_norm[:earliest].strip()
+                prefix_words = len(prefix.split()) if prefix else 0
+                prefix_group = (
+                    hashlib.sha1(prefix.encode("utf-8"))
+                    .hexdigest()[:8]
+                    if prefix
+                    else None
+                )
+                rows.append({
+                    "row": len(rows),
+                    "subject_position": "later",
+                    "prefix_words": prefix_words,
+                    "prefix_group": prefix_group,
+                })
+
+            result = {
+                "stages": stages,
+                "rows": rows,
+            }
+
+            print("=== TERMINATE PROBE V3.5H ===")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
             print("=== FINE TERMINATE PROBE ===")
 
-            green = all(
-                [
-                    result["accedi_al_test_seen_after_wait"],
-                    result["counts_match"],
-                    result["all_rows_parsed"],
-                    result["all_required_signals_present"],
-                    result["all_identity_schedules_unique"],
-                ]
-            )
-
-            if not green:
+            if stages["date_time_rows"] <= 0:
                 raise SystemExit(1)
 
             v3.core.best_effort_logout(page)

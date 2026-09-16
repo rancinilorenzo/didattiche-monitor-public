@@ -3757,41 +3757,25 @@ def terminated_meta_from_tail_v35(
     if presence is None:
         return None
 
-    before_presence = remainder[
-        :presence.start()
-    ]
+    # Diagnostica V3.5I:
+    # Materia è all'inizio della riga in tutti i casi osservati.
+    # Il Titolo termina prima della colonna "% presenza".
+    # La vera colonna "Test" viene dopo "% presenza" e prima
+    # di "Registrazione"; quindi NON va usata per tagliare il Titolo.
+    title = core.normalize_space(
+        remainder[:presence.start()]
+    )
 
-    test_labels = list(
-        re.finditer(
-            r"\bTest\b",
-            before_presence,
+    # "In aggiornamento", quando presente prima di % presenza,
+    # è uno stato della riga e non parte dell'identità.
+    title = core.normalize_space(
+        re.sub(
+            r"\bIn\s+aggiornamento\b\s*$",
+            "",
+            title,
             flags=re.IGNORECASE,
         )
     )
-
-    if not test_labels:
-        return None
-
-    # La colonna Test è l'ultima occorrenza di "Test" prima di % presenza.
-    # Questo evita di tagliare un eventuale "test" presente nel titolo.
-    title = core.normalize_space(
-        before_presence[
-            :test_labels[-1].start()
-        ]
-    )
-
-    # "In aggiornamento" è stato osservato come stato della riga,
-    # non come parte dell'identità della lezione.
-    updating = re.search(
-        r"\bIn\s+aggiornamento\b",
-        title,
-        flags=re.IGNORECASE,
-    )
-
-    if updating is not None:
-        title = core.normalize_space(
-            title[:updating.start()]
-        )
 
     if not subject or not title:
         return None
@@ -3801,7 +3785,6 @@ def terminated_meta_from_tail_v35(
         "title": title,
         "mercatorum_id": "",
     }
-
 
 def terminated_blocks_v35(
     body_text: str,
@@ -4095,6 +4078,24 @@ def scrape_terminated_v35_once() -> list[dict] | None:
 
             tab.click(timeout=10_000)
             core.settle_spa(page, 2000)
+
+            # La scheda Terminate viene popolata in modo asincrono.
+            # Il probe V3.5D/V3.5G ha mostrato che leggere subito può
+            # produrre 0 blocchi / 0 controlli anche con dati presenti.
+            try:
+                page.wait_for_function(
+                    r"""
+                    () =>
+                      /accedi\s+al\s+test/i.test(
+                        document.body.innerText || ''
+                      )
+                    """,
+                    timeout=15_000,
+                )
+            except Exception:
+                # Fail-closed: il controllo blocchi/controlli sotto
+                # impedirà comunque notifiche se la pagina non è pronta.
+                pass
 
             body_text = page.locator(
                 "body"

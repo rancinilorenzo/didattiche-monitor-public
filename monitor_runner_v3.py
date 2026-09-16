@@ -3486,6 +3486,1041 @@ def recovery_card(
 
 
 # ---------------------------------------------------------------------------
+# Post-lezione v3.5 - Terminate / In aggiornamento / Test disponibile
+# ---------------------------------------------------------------------------
+
+POST_LESSON_STATE_KEY = "post_lesson_v35"
+POST_LESSON_RETENTION_DAYS = max(
+    4,
+    int(
+        os.getenv(
+            "POST_LESSON_RETENTION_DAYS",
+            "7",
+        )
+    ),
+)
+POST_LESSON_ARM_PAST_HOURS = max(
+    1,
+    int(
+        os.getenv(
+            "POST_LESSON_ARM_PAST_HOURS",
+            "6",
+        )
+    ),
+)
+POST_LESSON_SCRAPE_ATTEMPTS = max(
+    1,
+    int(
+        os.getenv(
+            "POST_LESSON_SCRAPE_ATTEMPTS",
+            "3",
+        )
+    ),
+)
+POST_LESSON_RETRY_WAIT_SECONDS = max(
+    0,
+    int(
+        os.getenv(
+            "POST_LESSON_RETRY_WAIT_SECONDS",
+            "8",
+        )
+    ),
+)
+
+_legacy_save_extended_state_v35 = (
+    legacy.save_extended_state
+)
+
+
+def post_lesson_tracking_key(
+    lesson: core.Lesson,
+    meta: dict,
+) -> str | None:
+    identity = strict_identity_from_meta(
+        lesson,
+        meta,
+    )
+
+    if identity is None:
+        return None
+
+    raw = "|".join(
+        [
+            lesson.date,
+            lesson.start,
+            lesson.end,
+            identity[0],
+            identity[1],
+        ]
+    )
+
+    return legacy.hashlib.sha1(
+        raw.encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def post_lesson_control(
+    anti_skip_state: dict,
+) -> dict:
+    raw = anti_skip_state.get(
+        POST_LESSON_STATE_KEY,
+        {},
+    )
+
+    return (
+        dict(raw)
+        if isinstance(raw, dict)
+        else {}
+    )
+
+
+def tracker_lesson_and_meta(
+    entry: dict,
+) -> tuple[core.Lesson, dict] | None:
+    try:
+        lesson = core.lesson_from_dict(
+            entry["lesson"]
+        )
+
+        meta = normalize_lesson_meta(
+            lesson,
+            entry.get(
+                "meta",
+                fallback_meta(lesson),
+            ),
+        )
+
+        if strict_identity_from_meta(
+            lesson,
+            meta,
+        ) is None:
+            return None
+
+        return lesson, meta
+
+    except Exception:
+        return None
+
+
+def arm_post_lesson_tracking(
+    lessons: list[core.Lesson],
+    lesson_meta: dict[str, dict],
+    anti_skip_state: dict,
+    now: datetime,
+) -> dict:
+    control = post_lesson_control(
+        anti_skip_state
+    )
+
+    tracked_raw = control.get(
+        "tracked",
+        {},
+    )
+
+    tracked = (
+        dict(tracked_raw)
+        if isinstance(tracked_raw, dict)
+        else {}
+    )
+
+    active_keys: set[str] = set()
+    arm_cutoff = now - timedelta(
+        hours=POST_LESSON_ARM_PAST_HOURS
+    )
+
+    for lesson in lessons:
+        if lesson.end_dt < arm_cutoff:
+            continue
+
+        meta = normalize_lesson_meta(
+            lesson,
+            lesson_meta.get(
+                lesson.exact_key,
+                fallback_meta(lesson),
+            ),
+        )
+
+        if lesson_is_completed(
+            lesson,
+            meta,
+            set(_ACTIVE_COMPLETED_SUBJECTS),
+        ):
+            continue
+
+        key = post_lesson_tracking_key(
+            lesson,
+            meta,
+        )
+
+        if key is None:
+            continue
+
+        active_keys.add(key)
+
+        existing = tracked.get(
+            key,
+            {},
+        )
+
+        if not isinstance(existing, dict):
+            existing = {}
+
+        entry = dict(existing)
+        entry["lesson"] = asdict(lesson)
+        entry["meta"] = {
+            "subject": core.normalize_space(
+                meta.get("subject", "")
+            ),
+            "title": core.normalize_space(
+                meta.get("title", "")
+            ),
+        }
+
+        if not entry.get("armed_at"):
+            entry["armed_at"] = now.isoformat()
+
+        tracked[key] = entry
+
+    retention_cutoff = now - timedelta(
+        days=POST_LESSON_RETENTION_DAYS
+    )
+
+    for key in list(tracked):
+        entry = tracked.get(key)
+
+        if not isinstance(entry, dict):
+            tracked.pop(key, None)
+            continue
+
+        parsed = tracker_lesson_and_meta(
+            entry
+        )
+
+        if parsed is None:
+            tracked.pop(key, None)
+            continue
+
+        lesson, meta = parsed
+
+        if lesson_is_completed(
+            lesson,
+            meta,
+            set(_ACTIVE_COMPLETED_SUBJECTS),
+        ):
+            tracked.pop(key, None)
+            continue
+
+        # Una programmazione futura non più presente nello stato attivo
+        # è stata rimossa/riprogrammata: non deve generare post-lezione.
+        if (
+            key not in active_keys
+            and lesson.start_dt > now
+            and not entry.get(
+                "terminated_notified_at"
+            )
+        ):
+            tracked.pop(key, None)
+            continue
+
+        # Evita crescita indefinita dello stato. Sette giorni coprono
+        # ampiamente la finestra test di 72 ore senza inventare scadenze.
+        if lesson.end_dt < retention_cutoff:
+            tracked.pop(key, None)
+
+    control["tracked"] = tracked
+    control["version"] = 1
+    anti_skip_state[
+        POST_LESSON_STATE_KEY
+    ] = control
+
+    return control
+
+
+def terminated_meta_from_tail_v35(
+    tail: str,
+) -> dict | None:
+    split = split_official_subject(
+        tail
+    )
+
+    if split is None:
+        return None
+
+    subject, remainder = split
+
+    presence = re.search(
+        r"%\s*presenza\b",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+
+    if presence is None:
+        return None
+
+    before_presence = remainder[
+        :presence.start()
+    ]
+
+    test_labels = list(
+        re.finditer(
+            r"\bTest\b",
+            before_presence,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    if not test_labels:
+        return None
+
+    # La colonna Test è l'ultima occorrenza di "Test" prima di % presenza.
+    # Questo evita di tagliare un eventuale "test" presente nel titolo.
+    title = core.normalize_space(
+        before_presence[
+            :test_labels[-1].start()
+        ]
+    )
+
+    # "In aggiornamento" è stato osservato come stato della riga,
+    # non come parte dell'identità della lezione.
+    updating = re.search(
+        r"\bIn\s+aggiornamento\b",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+    if updating is not None:
+        title = core.normalize_space(
+            title[:updating.start()]
+        )
+
+    if not subject or not title:
+        return None
+
+    return {
+        "subject": subject,
+        "title": title,
+        "mercatorum_id": "",
+    }
+
+
+def terminated_blocks_v35(
+    body_text: str,
+) -> list[dict]:
+    text = core.normalize_space(
+        body_text
+    )
+
+    matches = list(
+        core.DATE_RE.finditer(
+            text
+        )
+    )
+
+    result: list[dict] = []
+
+    for index, match in enumerate(matches):
+        block_end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+
+        block = text[
+            match.start():block_end
+        ]
+
+        time_match = core.TIME_RE.search(
+            block
+        )
+
+        if time_match is None:
+            continue
+
+        day = int(
+            match.group("day")
+        )
+        month = core.MONTHS[
+            match.group("month").lower()
+        ]
+        year = int(
+            match.group("year")
+        )
+
+        date_iso = (
+            f"{year:04d}-{month:02d}-{day:02d}"
+        )
+        start = time_match.group("start")
+        end = time_match.group("end")
+
+        tail = core.normalize_space(
+            block[time_match.end():]
+        )
+        meta = terminated_meta_from_tail_v35(
+            tail
+        )
+
+        lesson = None
+
+        if meta is not None:
+            lesson = core.Lesson(
+                date=date_iso,
+                start=start,
+                end=end,
+                description=core.normalize_space(
+                    f"{meta['subject']} {meta['title']}"
+                ),
+            )
+
+        low = block.casefold()
+
+        result.append(
+            {
+                "lesson": lesson,
+                "meta": meta,
+                "contains_in_aggiornamento": (
+                    "in aggiornamento"
+                    in low
+                ),
+                "contains_accedi_al_test": (
+                    "accedi al test"
+                    in low
+                ),
+                "contains_test_label": bool(
+                    re.search(
+                        r"\btest\b",
+                        block,
+                        re.IGNORECASE,
+                    )
+                ),
+                "contains_presence": bool(
+                    re.search(
+                        r"%\s*presenza",
+                        block,
+                        re.IGNORECASE,
+                    )
+                ),
+                "contains_recording": (
+                    "registrazione"
+                    in low
+                ),
+            }
+        )
+
+    return result
+
+
+def terminated_test_controls_v35(
+    page,
+) -> list[dict]:
+    return page.evaluate(
+        r"""
+        () => {
+          const norm = value =>
+            (value || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+
+          const all = Array.from(
+            document.querySelectorAll('body *')
+          );
+
+          const leaves = all.filter(el => {
+            const text = norm(
+              el.innerText || el.textContent
+            );
+
+            if (!/^accedi\s+al\s+test$/i.test(text)) {
+              return false;
+            }
+
+            const childHasSameText = Array.from(
+              el.children
+            ).some(child =>
+              /^accedi\s+al\s+test$/i.test(
+                norm(
+                  child.innerText ||
+                  child.textContent
+                )
+              )
+            );
+
+            if (childHasSameText) {
+              return false;
+            }
+
+            const style = window.getComputedStyle(el);
+
+            return (
+              style.display !== 'none' &&
+              style.visibility !== 'hidden'
+            );
+          });
+
+          return leaves.map(leaf => {
+            const control = leaf.closest(
+              [
+                'button',
+                'a',
+                '[role="button"]',
+                '[tabindex]'
+              ].join(',')
+            ) || leaf;
+
+            const style = window.getComputedStyle(
+              control
+            );
+            const ariaDisabled = control.getAttribute(
+              'aria-disabled'
+            );
+
+            const disabled =
+              control.disabled === true ||
+              control.matches(':disabled') ||
+              control.hasAttribute('disabled') ||
+              ariaDisabled === 'true' ||
+              style.pointerEvents === 'none';
+
+            const href = control.getAttribute('href');
+            const validHref =
+              Boolean(href) &&
+              href !== '#' &&
+              href !== '' &&
+              !href.toLowerCase().startsWith(
+                'javascript:'
+              );
+
+            let active = false;
+
+            if (control.tagName === 'BUTTON') {
+              active = !disabled;
+            }
+
+            if (control.tagName === 'A') {
+              active = !disabled && validHref;
+            }
+
+            if (
+              control.tagName !== 'BUTTON' &&
+              control.tagName !== 'A'
+            ) {
+              active =
+                !disabled &&
+                (
+                  control.getAttribute('role') ===
+                    'button' ||
+                  control.hasAttribute('tabindex')
+                );
+            }
+
+            return {
+              tag: control.tagName,
+              active: active,
+              disabled: disabled,
+              valid_href: validHref
+            };
+          });
+        }
+        """
+    )
+
+
+def scrape_terminated_v35_once() -> list[dict] | None:
+    with legacy.sync_playwright() as p:
+        browser = p.chromium.launch(
+            channel="chrome",
+            headless=True,
+        )
+        context = browser.new_context(
+            locale="it-IT",
+            timezone_id=core.TIMEZONE_NAME,
+        )
+        page = context.new_page()
+
+        try:
+            page.goto(
+                core.SCHEDULE_URL,
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            core.settle_spa(page, 2000)
+            core.login_if_needed(page)
+
+            page.goto(
+                core.SCHEDULE_URL,
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            core.settle_spa(page, 2000)
+
+            if core.first_visible(
+                page,
+                [
+                    "#password",
+                    "input[type='password']",
+                ],
+            ):
+                core.login_if_needed(page)
+                page.goto(
+                    core.SCHEDULE_URL,
+                    wait_until="domcontentloaded",
+                    timeout=45_000,
+                )
+                core.settle_spa(page, 2000)
+
+            if core.first_visible(
+                page,
+                [
+                    "#password",
+                    "input[type='password']",
+                ],
+            ):
+                raise RuntimeError(
+                    "Mercatorum mostra ancora la pagina di login."
+                )
+
+            tab = core.first_visible(
+                page,
+                [
+                    "[role='tab']:has-text('Terminate')",
+                    "button:has-text('Terminate')",
+                    "a:has-text('Terminate')",
+                    "text=Terminate",
+                ],
+            )
+
+            if tab is None:
+                raise RuntimeError(
+                    "Scheda Terminate non trovata."
+                )
+
+            tab.click(timeout=10_000)
+            core.settle_spa(page, 2000)
+
+            body_text = page.locator(
+                "body"
+            ).inner_text(timeout=15_000)
+
+            blocks = terminated_blocks_v35(
+                body_text
+            )
+            controls = terminated_test_controls_v35(
+                page
+            )
+
+            print(
+                "V3.5 Terminate: "
+                f"{len(blocks)} blocchi / "
+                f"{len(controls)} controlli test."
+            )
+
+            if (
+                not blocks
+                or len(blocks) != len(controls)
+            ):
+                print(
+                    "V3.5 Terminate: pairing non affidabile; "
+                    "nessuna notifica post-lezione."
+                )
+                return None
+
+            observations: list[dict] = []
+
+            for index in range(len(blocks)):
+                block = dict(blocks[index])
+                block["control"] = controls[index]
+                observations.append(block)
+
+            core.best_effort_logout(page)
+            return observations
+
+        finally:
+            context.close()
+            browser.close()
+
+
+def scrape_terminated_v35_with_retry() -> list[dict] | None:
+    for attempt in range(
+        1,
+        POST_LESSON_SCRAPE_ATTEMPTS + 1,
+    ):
+        try:
+            return scrape_terminated_v35_once()
+
+        except Exception as exc:
+            print(
+                "V3.5 Terminate non disponibile "
+                f"({attempt}/{POST_LESSON_SCRAPE_ATTEMPTS}): "
+                f"{type(exc).__name__}"
+            )
+
+            if (
+                attempt < POST_LESSON_SCRAPE_ATTEMPTS
+                and POST_LESSON_RETRY_WAIT_SECONDS > 0
+            ):
+                legacy.time.sleep(
+                    POST_LESSON_RETRY_WAIT_SECONDS
+                )
+
+    return None
+
+
+def match_terminated_observation_v35(
+    entry: dict,
+    observations: list[dict],
+) -> dict | None:
+    parsed = tracker_lesson_and_meta(
+        entry
+    )
+
+    if parsed is None:
+        return None
+
+    lesson, meta = parsed
+    target_identity = strict_identity_from_meta(
+        lesson,
+        meta,
+    )
+
+    if target_identity is None:
+        return None
+
+    matches: list[dict] = []
+
+    for observation in observations:
+        observed_lesson = observation.get(
+            "lesson"
+        )
+        observed_meta = observation.get(
+            "meta"
+        )
+
+        if not isinstance(
+            observed_lesson,
+            core.Lesson,
+        ):
+            continue
+
+        if not isinstance(
+            observed_meta,
+            dict,
+        ):
+            continue
+
+        observed_identity = strict_identity_from_meta(
+            observed_lesson,
+            observed_meta,
+        )
+
+        if observed_identity != target_identity:
+            continue
+
+        # Il pairing test->lezione è accettato solo sulla stessa
+        # programmazione esatta. Se Mercatorum cambia struttura o dati,
+        # meglio nessuna notifica che un test attribuito male.
+        if (
+            observed_lesson.date != lesson.date
+            or observed_lesson.start != lesson.start
+            or observed_lesson.end != lesson.end
+        ):
+            continue
+
+        if not (
+            observation.get(
+                "contains_accedi_al_test"
+            )
+            and observation.get(
+                "contains_test_label"
+            )
+            and observation.get(
+                "contains_presence"
+            )
+            and observation.get(
+                "contains_recording"
+            )
+        ):
+            continue
+
+        matches.append(observation)
+
+    if len(matches) != 1:
+        return None
+
+    return matches[0]
+
+
+def notify_post_lesson_v35(
+    title: str,
+    body: str,
+) -> bool:
+    chat_id = legacy.telegram_main_chat_id()
+
+    if not chat_id:
+        return False
+
+    try:
+        legacy.telegram_send_html(
+            title,
+            body,
+            chat_id,
+        )
+
+        print(
+            f"{title} — notifica elaborata "
+            "(dettagli omessi dal log)."
+        )
+        return True
+
+    except Exception as exc:
+        print(
+            "V3.5 notifica Telegram non riuscita: "
+            f"{type(exc).__name__}"
+        )
+        return False
+
+
+def post_lesson_body_v35(
+    lesson: core.Lesson,
+    meta: dict,
+    phase: str,
+) -> str:
+    lines = lesson_identity_lines(
+        lesson,
+        meta,
+    )
+
+    lines.append("")
+
+    if phase == "terminated":
+        lines.append(
+            "La lezione non è più in diretta."
+        )
+
+    elif phase == "updating":
+        lines += [
+            "Mercatorum sta aggiornando i dati della didattica.",
+            "📝 Test: non ancora disponibile",
+        ]
+
+    elif phase == "test":
+        lines += [
+            "📝 Ora puoi accedere al test.",
+            "⏳ Il test può essere svolto entro 72 ore.",
+        ]
+
+    else:
+        raise ValueError(
+            "Fase post-lezione non riconosciuta."
+        )
+
+    return "\n".join(lines)
+
+
+def process_post_lesson_v35(
+    lessons: list[core.Lesson],
+    lesson_meta: dict[str, dict],
+    anti_skip_state: dict,
+) -> None:
+    now = datetime.now(
+        core.TIMEZONE
+    )
+
+    control = arm_post_lesson_tracking(
+        lessons,
+        lesson_meta,
+        anti_skip_state,
+        now,
+    )
+
+    tracked = control.get(
+        "tracked",
+        {},
+    )
+
+    if not isinstance(tracked, dict):
+        return
+
+    eligible: list[tuple[str, dict]] = []
+
+    for key, entry in tracked.items():
+        if not isinstance(entry, dict):
+            continue
+
+        parsed = tracker_lesson_and_meta(
+            entry
+        )
+
+        if parsed is None:
+            continue
+
+        lesson, _ = parsed
+
+        if lesson.start_dt > now:
+            continue
+
+        if (
+            now - lesson.end_dt
+            > timedelta(
+                days=POST_LESSON_RETENTION_DAYS
+            )
+        ):
+            continue
+
+        if entry.get(
+            "test_available_notified_at"
+        ):
+            continue
+
+        eligible.append(
+            (key, entry)
+        )
+
+    if not eligible:
+        return
+
+    observations = (
+        scrape_terminated_v35_with_retry()
+    )
+
+    if observations is None:
+        return
+
+    for key, entry in eligible:
+        match = match_terminated_observation_v35(
+            entry,
+            observations,
+        )
+
+        if match is None:
+            continue
+
+        parsed = tracker_lesson_and_meta(
+            entry
+        )
+
+        if parsed is None:
+            continue
+
+        lesson, meta = parsed
+
+        if not entry.get(
+            "terminated_notified_at"
+        ):
+            sent = notify_post_lesson_v35(
+                "🏁 DIDATTICA TERMINATA",
+                post_lesson_body_v35(
+                    lesson,
+                    meta,
+                    "terminated",
+                ),
+            )
+
+            if not sent:
+                # Preserva l'ordine delle fasi: se la prima notifica
+                # fallisce, le successive aspettano il run seguente.
+                continue
+
+            entry[
+                "terminated_notified_at"
+            ] = now.isoformat()
+
+        if (
+            match.get(
+                "contains_in_aggiornamento"
+            )
+            and not entry.get(
+                "updating_notified_at"
+            )
+        ):
+            sent = notify_post_lesson_v35(
+                "⏳ AGGIORNAMENTO POST-LEZIONE",
+                post_lesson_body_v35(
+                    lesson,
+                    meta,
+                    "updating",
+                ),
+            )
+
+            if sent:
+                entry[
+                    "updating_notified_at"
+                ] = now.isoformat()
+
+        control_info = match.get(
+            "control",
+            {},
+        )
+
+        if (
+            not match.get(
+                "contains_in_aggiornamento"
+            )
+            and isinstance(control_info, dict)
+            and control_info.get("active") is True
+            and not entry.get(
+                "test_available_notified_at"
+            )
+        ):
+            sent = notify_post_lesson_v35(
+                "✅ TEST DISPONIBILE",
+                post_lesson_body_v35(
+                    lesson,
+                    meta,
+                    "test",
+                ),
+            )
+
+            if sent:
+                entry[
+                    "test_available_notified_at"
+                ] = now.isoformat()
+
+        tracked[key] = entry
+
+    control["tracked"] = tracked
+    control["last_success_at"] = now.isoformat()
+    anti_skip_state[
+        POST_LESSON_STATE_KEY
+    ] = control
+
+
+def save_extended_state_v35(
+    lessons: list[core.Lesson],
+    reminded: set[str],
+    calendar_events: dict[str, str],
+    pending_missing: dict[str, dict],
+    removed_history: list[dict],
+    lesson_meta: dict[str, dict],
+    anti_skip_state: dict,
+) -> None:
+    """
+    V3.5 è additiva: lavora solo sul proprio stato dentro anti_skip
+    e poi delega integralmente il salvataggio cifrato alla V3 esistente.
+    Un errore post-lezione non deve bloccare Calendar/Anti-Salto/state.enc.
+    """
+    try:
+        process_post_lesson_v35(
+            lessons,
+            lesson_meta,
+            anti_skip_state,
+        )
+
+    except Exception as exc:
+        print(
+            "V3.5 post-lezione non disponibile: "
+            f"{type(exc).__name__}"
+        )
+
+    _legacy_save_extended_state_v35(
+        lessons,
+        reminded,
+        calendar_events,
+        pending_missing,
+        removed_history,
+        lesson_meta,
+        anti_skip_state,
+    )
+
+# ---------------------------------------------------------------------------
 # Attiva le sostituzioni nel modulo legacy.
 # La logica di monitoraggio rimane quella già collaudata in monitor_runner.py.
 # ---------------------------------------------------------------------------
@@ -3498,6 +4533,7 @@ legacy.modified_card = modified_card
 legacy.recovery_card = recovery_card
 legacy.notify_recovery_anti_skip = notify_recovery_anti_skip
 legacy.scrape_snapshot = scrape_snapshot_filtered
+legacy.save_extended_state = save_extended_state_v35
 
 # V3.4: nessun matching per semplice similarità percentuale.
 core.diff_lessons = strict_diff_lessons

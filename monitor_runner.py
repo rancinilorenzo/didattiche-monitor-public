@@ -2017,7 +2017,7 @@ def main() -> int:
     pending_preserved: list[core.Lesson] = []
     transitions: list[core.Lesson] = []
 
-    if not old_lessons:
+    if not old_lessons and new_lessons:
         core.notify(
             "✅ Mercatorum monitor attivato",
             (
